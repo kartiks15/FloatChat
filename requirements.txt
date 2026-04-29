@@ -1,0 +1,23 @@
+# FloatChat — Python Dependencies
+ 
+# Core
+netCDF4>=1.6.5
+numpy>=1.26.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0
+loguru>=0.7.2
+nest_asyncio>=1.5.0
+ 
+# MCP + LangChain
+mcp>=1.0.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-mcp-adapters>=0.1.0
+ 
+# Dashboard
+dash>=2.17.0
+dash-bootstrap-components>=1.6.0
+plotly>=5.22.0
+ 
+# Optional: faster NetCDF / xarray-based workflows
+xarray>=2024.1.0
