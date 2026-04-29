@@ -268,7 +268,7 @@ To extend FloatChat:
 
 ## License
 
-[Specify your license here]
+General Public License
 
 ## Contact
 
