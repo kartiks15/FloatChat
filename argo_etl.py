@@ -38,6 +38,21 @@ def apply_schema(conn, schema_path):
     conn.commit()
 
 
+def refresh_summary(conn):
+    """Recompute the materialized profile_summary. Returns False if schema.sql is not applied yet."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT relkind, relispopulated FROM pg_class WHERE oid = to_regclass('profile_summary')")
+        row = cur.fetchone()
+        if not row or row[0] != "m":
+            conn.rollback()
+            log.warning("profile_summary is not a materialized view; apply schema.sql to enable it.")
+            return False
+        # CONCURRENTLY lets the dashboard keep reading the old summary while this runs.
+        cur.execute("REFRESH MATERIALIZED VIEW " + ("CONCURRENTLY " if row[1] else "") + "profile_summary")
+    conn.commit()
+    return True
+
+
 def clean_float(value):
     if value is None or np.ma.is_masked(value):
         return None
@@ -207,10 +222,11 @@ def main():
     parser.add_argument("--init-schema", action="store_true", help="Apply non-destructive schema bootstrap/migration")
     parser.add_argument("--schema", default=str(Path(__file__).with_name("schema.sql")))
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--pattern", default="*.nc", help="File-name pattern searched under --dir, e.g. '*_Sprof.nc'")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
-    files = [Path(args.file)] if args.file else sorted(Path(args.dir).rglob("*.nc"))
+    files = [Path(args.file)] if args.file else sorted(Path(args.dir).rglob(args.pattern))
     if args.limit:
         files = files[:args.limit]
     if not files:
@@ -224,6 +240,15 @@ def main():
             result = process_file(conn, path)
             failures += bool(result["error"])
             log.info("%s: %s", path.name, {k:v for k,v in result.items() if k != "file"})
+        if failures < len(files):
+            try:
+                if refresh_summary(conn):
+                    log.info("Refreshed profile_summary")
+            except psycopg2.Error as exc:
+                conn.rollback()
+                failures += 1
+                log.error("Could not refresh profile_summary (%s); run REFRESH MATERIALIZED VIEW "
+                          "profile_summary in psql or re-run the import.", type(exc).__name__)
     finally:
         conn.close()
     return 1 if failures else 0

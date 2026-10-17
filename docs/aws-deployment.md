@@ -210,6 +210,63 @@ docker image prune -f
 
 If `schema.sql` changed, back up the database first (see Maintenance below).
 
+## Adding more floats
+
+For new floats, download the single merged `<WMO>_Sprof.nc` file per float rather than
+one file per cycle. It holds the core and BGC measurements on one grid and downloads
+in seconds. **Never import both kinds for the same float**, or every depth point
+appears twice. The floats from step 7 and the follow-up per-cycle downloads (2902115,
+2902118, 2902264, 6901486, 6901487, 1901499) stay as they are.
+
+### One-time update: precomputed map summary
+
+The map reads `profile_summary`. It used to be a view that recalculated stats from
+every measurement on each page load, which would time out once millions of rows are
+loaded. It is now a materialized view (a stored table) that each import refreshes at
+the end. Existing servers need the migration once:
+
+```bash
+cd ~/FloatChat
+git pull
+mkdir -p backups && chmod 700 backups
+docker compose exec -T db pg_dump -U floatchat_admin -d floatchat -Fc > backups/before-summary.dump
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U floatchat_admin -d floatchat < schema.sql
+docker compose up --build -d --wait
+```
+
+The rebuild matters: the import (`etl`) uses the same image as the app, and only the
+new image refreshes the summary.
+
+### Download and import 20 Indian Ocean BGC floats
+
+These floats have oxygen and chlorophyll data. They cover the Arabian Sea, the Bay of
+Bengal, the equator, the southern Indian Ocean and its Southern Ocean sector, and mix
+floats still reporting in October 2026 with older INCOIS deployments. The download is
+about 207 MB. Expect about 2 million new measurement rows and a database of roughly
+1.5 GB. Run it in `tmux` so a dropped SSH session doesn't stop it (reconnect with
+`tmux attach -t floats`):
+
+```bash
+tmux new -s floats
+cd ~/FloatChat
+python3 download_argo.py --type Sprof --out-dir data/argo --wmo 2902272 7901136 5907092 2902114 2902158 2902296 1902751 1902594 6990503 5906970 6990505 6904118 1902458 2903831 5906539 1902455 2903465 5906500 5906537 5906501
+docker compose run --rm etl --dir /data/argo --pattern '*_Sprof.nc'
+```
+
+`--pattern '*_Sprof.nc'` imports only the merged files, so the ones already loaded
+aren't re-read. The import can take tens of minutes. It finishes with
+`Refreshed profile_summary`, and the map picks up the new floats on its next load.
+Check space afterwards:
+
+```bash
+df -h /
+docker compose exec -T db psql -U floatchat_admin -d floatchat -c "SELECT pg_size_pretty(pg_database_size('floatchat'))"
+```
+
+To add other floats later, use the same two commands with different WMO numbers.
+Pick BGC floats, since only those have `Sprof` files. `download_argo.py` searches the
+incois, bodc, coriolis, csio, kordi, aoml, meds, jma and nmdis data centres.
+
 ## Switching to your own domain later
 
 Create a DNS A record pointing at the static IP. Change `DOMAIN=` in `~/FloatChat/.env`,

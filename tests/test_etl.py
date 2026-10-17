@@ -59,6 +59,62 @@ class EtlTests(unittest.TestCase):
             conn.rollback.assert_called_once()
             conn.commit.assert_not_called()
 
+    def test_refresh_summary_uses_concurrent_refresh_once_populated(self):
+        for populated, statement in [(True, 'REFRESH MATERIALIZED VIEW CONCURRENTLY profile_summary'),
+                                     (False, 'REFRESH MATERIALIZED VIEW profile_summary')]:
+            conn = MagicMock()
+            cur = conn.cursor.return_value.__enter__.return_value
+            cur.fetchone.return_value = ('m', populated)
+            self.assertTrue(etl.refresh_summary(conn))
+            self.assertEqual(cur.execute.call_args.args[0], statement)
+            conn.commit.assert_called_once()
+
+    def test_refresh_summary_skips_unmigrated_schema(self):
+        for row in [('v', True), None]:
+            conn = MagicMock()
+            cur = conn.cursor.return_value.__enter__.return_value
+            cur.fetchone.return_value = row
+            self.assertFalse(etl.refresh_summary(conn))
+            self.assertEqual(cur.execute.call_count, 1)
+            conn.commit.assert_not_called()
+
+    def test_main_refreshes_summary_only_after_an_import(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ['D2902115_001.nc', 'D2902115_002.nc']:
+                (Path(folder) / name).touch()
+            argv = ['argo_etl.py', '--dir', folder]
+            for errors, refreshed, exit_code in [([None, 'OSError'], True, 1),
+                                                 (['OSError', 'OSError'], False, 1),
+                                                 ([None, None], True, 0)]:
+                results = [{'error': e, 'profiles': 0, 'obs': 0, 'skipped': 0} for e in errors]
+                with patch('sys.argv', argv), patch('argo_etl.get_connection'), \
+                        patch('argo_etl.process_file', side_effect=results), \
+                        patch('argo_etl.refresh_summary', return_value=True) as refresh:
+                    self.assertEqual(etl.main(), exit_code)
+                self.assertEqual(refresh.called, refreshed)
+
+    def test_main_pattern_selects_only_matching_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ['incois/2902115/profiles/D2902115_001.nc', 'aoml/5906539/5906539_Sprof.nc']:
+                (Path(folder) / name).parent.mkdir(parents=True, exist_ok=True)
+                (Path(folder) / name).touch()
+            result = {'error': None, 'profiles': 1, 'obs': 2, 'skipped': 0}
+            with patch('sys.argv', ['argo_etl.py', '--dir', folder, '--pattern', '*_Sprof.nc']), \
+                    patch('argo_etl.get_connection'), patch('argo_etl.refresh_summary', return_value=True), \
+                    patch('argo_etl.process_file', return_value=result) as process:
+                self.assertEqual(etl.main(), 0)
+            self.assertEqual([call.args[1].name for call in process.call_args_list], ['5906539_Sprof.nc'])
+
+    def test_main_reports_failed_refresh(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'D2902115_001.nc').touch()
+            result = {'error': None, 'profiles': 1, 'obs': 2, 'skipped': 0}
+            with patch('sys.argv', ['argo_etl.py', '--dir', folder]), patch('argo_etl.get_connection') as connect, \
+                    patch('argo_etl.process_file', return_value=result), \
+                    patch('argo_etl.refresh_summary', side_effect=etl.psycopg2.OperationalError('lock')):
+                self.assertEqual(etl.main(), 1)
+            connect.return_value.rollback.assert_called_once()
+
     def test_source_key_keeps_distinct_grids(self):
         self.assertEqual(etl.source_key('R2902115_001.nc'), etl.source_key('D2902115_001.nc'))
         self.assertNotEqual(etl.source_key('BD2902115_001.nc'), etl.source_key('D2902115_001.nc'))

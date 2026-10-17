@@ -78,8 +78,18 @@ ALTER TABLE observations ADD COLUMN IF NOT EXISTS source_profile INTEGER NOT NUL
 ALTER TABLE observations ADD COLUMN IF NOT EXISTS source_rank SMALLINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_obs_source ON observations(profile_id, source_file, source_profile);
 
--- ── Helpful view: profile summary ─────────────────────────
-CREATE OR REPLACE VIEW profile_summary AS
+-- ── Materialized profile summary ──────────────────────────
+-- Per-profile stats for the map, precomputed so page loads never aggregate every
+-- observation. argo_etl.py refreshes it after each import. Installs created before
+-- this change have a plain view with the same name: replace it once.
+DO $$
+BEGIN
+    IF (SELECT relkind FROM pg_class WHERE oid = to_regclass('profile_summary')) = 'v' THEN
+        DROP VIEW profile_summary;
+    END IF;
+END $$;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS profile_summary AS
 SELECT
     p.profile_id,
     p.wmo_id,
@@ -100,4 +110,16 @@ SELECT
 FROM profiles p
 LEFT JOIN observations o ON o.profile_id = p.profile_id
 GROUP BY p.profile_id, p.wmo_id, p.cycle_number, p.date_utc,
-         p.latitude, p.longitude, p.data_mode;
+         p.latitude, p.longitude, p.data_mode
+WITH DATA;
+
+-- Required by REFRESH ... CONCURRENTLY, which keeps the map readable during imports.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_summary_id ON profile_summary(profile_id);
+
+-- New installs grant this in deploy/postgres/20-reader.sh; migrated installs need it here.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'floatchat_reader') THEN
+        GRANT SELECT ON profile_summary TO floatchat_reader;
+    END IF;
+END $$;

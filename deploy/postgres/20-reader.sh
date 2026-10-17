@@ -7,6 +7,7 @@ CREATE ROLE floatchat_reader LOGIN PASSWORD :'reader_password';
 GRANT CONNECT ON DATABASE floatchat TO floatchat_reader;
 GRANT USAGE ON SCHEMA public TO floatchat_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO floatchat_reader;
+GRANT SELECT ON profile_summary TO floatchat_reader;
 ALTER DEFAULT PRIVILEGES FOR ROLE floatchat_admin IN SCHEMA public GRANT SELECT ON TABLES TO floatchat_reader;
 ALTER ROLE floatchat_reader SET default_transaction_read_only = on;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
