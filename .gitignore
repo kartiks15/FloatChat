@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.venv*/
+__pycache__/
+*.py[cod]
+.vscode/
+.pytest_cache/
+.ruff_cache/
+data/
+runtime/
+backups/
+*.session.sql
+*.log

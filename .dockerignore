@@ -1,0 +1,6 @@
+*
+!*.py
+!schema.sql
+!requirements.lock
+!assets/
+!assets/**

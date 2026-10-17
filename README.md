@@ -96,6 +96,11 @@ python app.py
 
 The dashboard will be available at: **http://localhost:8050**
 
+## Deployment
+
+To host FloatChat on AWS Lightsail with Docker Compose and automatic HTTPS (about $12/month,
+covered by new-account AWS credits), follow [docs/aws-deployment.md](docs/aws-deployment.md).
+
 ## Usage
 
 ### Chat Panel (Left Sidebar)

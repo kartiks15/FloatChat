@@ -1,0 +1,47 @@
+name: FloatChat checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_DB: floatchat_test
+          POSTGRES_PASSWORD: test-only-password
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: pip install -r requirements.lock
+      - run: python -m unittest discover -s tests -v
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/floatchat_test
+      - name: Build and start the actual deployment
+        env:
+          POSTGRES_PASSWORD: ci-admin-only-password
+          APP_DB_PASSWORD: ci-reader-only-password
+          DOMAIN: example.com
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f deploy/compose.production.yaml config --quiet
+          docker compose up --build -d --wait
+          curl --fail http://localhost:8080/healthz
+          curl --fail http://localhost:8080/readyz
+          curl --fail http://localhost:8080/_dash-layout > /dev/null
+          docker compose exec -T app python -c "from database import fetch_rows; assert fetch_rows('SELECT current_user AS role')[0]['role'] == 'floatchat_reader'"
+      - name: Diagnostics and cleanup
+        if: always()
+        env:
+          POSTGRES_PASSWORD: ci-admin-only-password
+          APP_DB_PASSWORD: ci-reader-only-password
+        run: |
+          docker compose logs --tail 80
+          docker compose down -v

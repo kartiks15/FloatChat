@@ -2,14 +2,11 @@
 -- FloatChat — ARGO PostgreSQL Schema
 -- ============================================================
 
--- Drop tables in dependency order (safe re-run)
-DROP TABLE IF EXISTS observations CASCADE;
-DROP TABLE IF EXISTS profiles CASCADE;
-DROP TABLE IF EXISTS floats CASCADE;
+-- Idempotent bootstrap/migration. Existing measurements are preserved.
 
 -- ── floats ────────────────────────────────────────────────
 -- One row per physical ARGO float (WMO number)
-CREATE TABLE floats (
+CREATE TABLE IF NOT EXISTS floats (
     wmo_id          VARCHAR(16)  PRIMARY KEY,
     platform_type   VARCHAR(64),
     dac             VARCHAR(64),         -- Data Assembly Centre (e.g. CORIOLIS, AOML)
@@ -20,7 +17,7 @@ CREATE TABLE floats (
 
 -- ── profiles ──────────────────────────────────────────────
 -- One row per float surfacing event (dive cycle)
-CREATE TABLE profiles (
+CREATE TABLE IF NOT EXISTS profiles (
     profile_id      SERIAL       PRIMARY KEY,
     wmo_id          VARCHAR(16)  NOT NULL REFERENCES floats(wmo_id),
     cycle_number    INTEGER      NOT NULL,
@@ -36,15 +33,15 @@ CREATE TABLE profiles (
     UNIQUE (wmo_id, cycle_number, direction)
 );
 
-CREATE INDEX idx_profiles_wmo        ON profiles(wmo_id);
-CREATE INDEX idx_profiles_date       ON profiles(date_utc);
-CREATE INDEX idx_profiles_latlon     ON profiles(latitude, longitude);
+CREATE INDEX IF NOT EXISTS idx_profiles_wmo        ON profiles(wmo_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_date       ON profiles(date_utc);
+CREATE INDEX IF NOT EXISTS idx_profiles_latlon     ON profiles(latitude, longitude);
 
 -- ── observations ──────────────────────────────────────────
 -- One row per depth level within a profile
 -- Core variables: PRES, TEMP, PSAL
 -- BGC variables stored as nullable columns (populated only for BGC floats)
-CREATE TABLE observations (
+CREATE TABLE IF NOT EXISTS observations (
     obs_id          BIGSERIAL    PRIMARY KEY,
     profile_id      INTEGER      NOT NULL REFERENCES profiles(profile_id) ON DELETE CASCADE,
     wmo_id          VARCHAR(16)  NOT NULL,   -- denormalised for fast queries
@@ -69,11 +66,17 @@ CREATE TABLE observations (
     bbp700_qc       SMALLINT
 );
 
-CREATE INDEX idx_obs_profile   ON observations(profile_id);
-CREATE INDEX idx_obs_wmo       ON observations(wmo_id);
-CREATE INDEX idx_obs_date      ON observations(date_utc);
-CREATE INDEX idx_obs_latlon    ON observations(latitude, longitude);
-CREATE INDEX idx_obs_pres      ON observations(pres);
+CREATE INDEX IF NOT EXISTS idx_obs_profile   ON observations(profile_id);
+CREATE INDEX IF NOT EXISTS idx_obs_wmo       ON observations(wmo_id);
+CREATE INDEX IF NOT EXISTS idx_obs_date      ON observations(date_utc);
+CREATE INDEX IF NOT EXISTS idx_obs_latlon    ON observations(latitude, longitude);
+CREATE INDEX IF NOT EXISTS idx_obs_pres      ON observations(pres);
+
+-- Preserve independent core/BGC grids and replace only the same source on re-import.
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS source_file VARCHAR(256) NOT NULL DEFAULT 'legacy';
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS source_profile INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE observations ADD COLUMN IF NOT EXISTS source_rank SMALLINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_obs_source ON observations(profile_id, source_file, source_profile);
 
 -- ── Helpful view: profile summary ─────────────────────────
 CREATE OR REPLACE VIEW profile_summary AS

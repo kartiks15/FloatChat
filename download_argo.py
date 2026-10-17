@@ -5,13 +5,12 @@ Downloads sample ARGO float profiles from the IFREMER GDAC FTP.
 Focuses on Indian Ocean floats for the PoC.
 
 Usage:
-    python download_argo.py --ocean indian --n-floats 5 --out-dir ./data/argo/
+    python download_argo.py --sample --out-dir ./data/argo/
 
 Or download specific WMO IDs:
     python download_argo.py --wmo 2902115 2902116 --out-dir ./data/argo/
 """
 
-import os
 import ftplib
 import argparse
 import logging
@@ -52,11 +51,14 @@ def download_file(ftp: ftplib.FTP, remote_path: str, local_path: Path) -> bool:
         log.info("  Already exists, skipping: %s", local_path.name)
         return True
     try:
-        with open(local_path, "wb") as f:
+        partial = local_path.with_suffix(local_path.suffix + ".part")
+        with open(partial, "wb") as f:
             ftp.retrbinary(f"RETR {remote_path}", f.write)
+        partial.replace(local_path)
         log.info("  Downloaded: %s  (%.1f KB)", local_path.name, local_path.stat().st_size / 1024)
         return True
-    except ftplib.error_perm as e:
+    except (OSError, EOFError, ftplib.Error) as e:
+        partial.unlink(missing_ok=True)
         log.warning("  FTP error for %s: %s", remote_path, e)
         return False
 
@@ -76,9 +78,10 @@ def download_by_wmo(wmo_ids: list, out_dir: Path, profile_type: str = "profiles"
     except Exception as e:
         log.error("Cannot connect to GDAC FTP: %s", e)
         log.info("TIP: Download manually from https://data-argo.ifremer.fr/dac/")
-        return
+        return False
 
     downloaded = 0
+    failures = 0
     for wmo in wmo_ids:
         log.info("Looking up WMO %s ...", wmo)
 
@@ -98,8 +101,9 @@ def download_by_wmo(wmo_ids: list, out_dir: Path, profile_type: str = "profiles"
             if profile_type == "Sprof":
                 # Single merged BGC file: <WMO>_Sprof.nc
                 remote = f"{dac_wmo_path}/{wmo}_Sprof.nc"
-                download_file(ftp, remote, wmo_out / f"{wmo}_Sprof.nc")
-                downloaded += 1
+                ok = download_file(ftp, remote, wmo_out / f"{wmo}_Sprof.nc")
+                downloaded += int(ok)
+                failures += int(not ok)
             else:
                 # Individual profile files in /profiles/ subdirectory
                 prof_dir = f"{dac_wmo_path}/profiles"
@@ -108,21 +112,25 @@ def download_by_wmo(wmo_ids: list, out_dir: Path, profile_type: str = "profiles"
                     if not nc_file.endswith(".nc"):
                         continue
                     fname = Path(nc_file).name
-                    # Prefer R (real-time) files; skip D (delayed) duplicates unless no R exists
-                    if fname.startswith("D") and any(
-                        Path(f).name == "R" + fname[1:] for f in nc_files
+                    # Prefer delayed quality-controlled versions when both exist.
+                    if fname.startswith("R") and any(
+                        Path(f).name == "D" + fname[1:] for f in nc_files
                     ):
                         continue
                     ok = download_file(ftp, nc_file, wmo_out / "profiles" / fname)
                     if ok:
                         downloaded += 1
+                    else:
+                        failures += 1
             break
 
         if not found:
+            failures += 1
             log.warning("  WMO %s not found in any DAC. Try: https://data-argo.ifremer.fr", wmo)
 
     ftp.quit()
     log.info("Done. %d file(s) downloaded to %s", downloaded, out_dir)
+    return failures == 0 and downloaded > 0
 
 
 def main():
@@ -140,8 +148,10 @@ def main():
     args = parser.parse_args()
 
     wmo_ids = args.wmo if args.wmo else SAMPLE_WMO
-    download_by_wmo(wmo_ids, Path(args.out_dir), profile_type=args.type)
+    if any(not wmo.isdigit() or not 5 <= len(wmo) <= 8 for wmo in wmo_ids):
+        parser.error("WMO IDs must contain 5–8 digits")
+    return 0 if download_by_wmo(wmo_ids, Path(args.out_dir), profile_type=args.type) else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

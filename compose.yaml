@@ -1,0 +1,86 @@
+name: floatchat
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+x-app: &app
+  build: .
+  image: floatchat:local
+  init: true
+  logging: *logging
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+services:
+  db:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: floatchat
+      POSTGRES_USER: floatchat_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+      - ./deploy/postgres/20-reader.sh:/docker-entrypoint-initdb.d/20-reader.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U floatchat_admin -d floatchat"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+  app:
+    <<: *app
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp"]
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DB_HOST: db
+      DB_NAME: floatchat
+      DB_USER: floatchat_reader
+      DB_PASS: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env}
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      AI_DAILY_REQUEST_LIMIT: ${AI_DAILY_REQUEST_LIMIT:-20}
+      AI_HOURLY_CLIENT_LIMIT: ${AI_HOURLY_CLIENT_LIMIT:-5}
+      AI_QUOTA_DB: /app/runtime/ai-quota.sqlite3
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-qwen.qwen3-32b-v1:0}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      TRUST_PROXY: "true"
+    volumes:
+      - ai_runtime:/app/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app: {condition: service_healthy}
+    ports: ["127.0.0.1:8080:80"]
+    volumes:
+      - ./deploy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+    logging: *logging
+  etl:
+    <<: *app
+    profiles: ["tools"]
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      DB_HOST: db
+      DB_NAME: floatchat
+      DB_WRITE_USER: floatchat_admin
+      DB_WRITE_PASS: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./data:/data:ro
+    entrypoint: ["python", "argo_etl.py"]
+    command: ["--dir", "/data", "--limit", "10"]
+    healthcheck: {disable: true}
+volumes:
+  postgres_data:
+  ai_runtime:
