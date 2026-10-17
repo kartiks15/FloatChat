@@ -86,6 +86,15 @@ In the [Lightsail console](https://lightsail.aws.amazon.com/), choose **Create i
 - **Plan:** General purpose, **$12 USD** (2 GB RAM, 2 vCPU, 60 GB SSD).
 - **Name:** `floatchat`, then **Create instance**.
 
+New accounts are sometimes refused with *"your account can not create an instance
+using this Lightsail plan size"*. The limit can differ by region: one new account
+refused in Mumbai created the $12 plan in N. Virginia (`us-east-1`) straight away.
+Otherwise pick the **$7 USD** plan (1 GB RAM, 2 vCPU, 40 GB SSD), and check the
+launch script is still in its box after changing region or plan. Each Dash
+worker measured about 60 MB after import, so the stack fits in 1 GB, and the launch
+script's 2 GB of swap covers image builds and imports. Avoid the 512 MB plan. AWS
+lifts the restriction on its own over time; you can upsize later from a snapshot.
+
 The launch script needs about 3–5 minutes after the instance shows *Running*.
 
 ### 3. Attach a static IP
