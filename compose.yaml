@@ -52,6 +52,10 @@ services:
       AWS_REGION: ${AWS_REGION:-us-east-1}
       BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-qwen.qwen3-32b-v1:0}
       AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-qwen/qwen3-235b-a22b-2507}
+      ALLOW_USER_API_KEYS: ${ALLOW_USER_API_KEYS:-true}
+      AI_USER_KEY_HOURLY_LIMIT: ${AI_USER_KEY_HOURLY_LIMIT:-30}
       TRUST_PROXY: "true"
     volumes:
       - ai_runtime:/app/runtime

@@ -76,6 +76,60 @@ class ChatTests(unittest.TestCase):
             self.assertTrue(post.call_args.args[0].endswith('/api/chat'))
             self.assertFalse(post.call_args.kwargs['json']['stream'])
 
+    def test_visitor_openrouter_key_is_used_without_server_ai(self):
+        key = 'sk-or-v1-' + 'a' * 64
+        response = MagicMock(status_code=200)
+        response.iter_content.return_value = [b'{"choices":[{"message":{"content":"hello"}}]}']
+        response.__enter__.return_value = response
+        with patch.dict(os.environ, {'AI_ENABLED': 'false', 'AI_PROVIDER': 'ollama'}), \
+             patch('chat_service.requests.post', return_value=response) as post:
+            self.assertEqual(chat.generate('system', 'question', json_mode=True, api_key=key,
+                                           model='https://evil.example/model'), 'hello')
+            self.assertEqual(post.call_args.args[0], chat.OPENROUTER_URL)
+            self.assertEqual(post.call_args.kwargs['headers']['Authorization'], 'Bearer ' + key)
+            body = post.call_args.kwargs['json']
+            self.assertEqual(body['model'], chat.OPENROUTER_DEFAULT_MODEL)
+            self.assertEqual(body['response_format'], {'type': 'json_object'})
+
+    def test_visitor_key_skips_shared_quota_and_disabled_server(self):
+        key = 'sk-or-v1-' + 'b' * 64
+        with patch.dict(os.environ, {'AI_ENABLED': 'false'}), \
+             patch('chat_service.reserve_request') as reserve, \
+             patch('chat_service.generate', side_effect=['{"tool":"dataset_summary","arguments":{}}', 'Two floats.']) as model, \
+             patch('chat_service.execute_tool', return_value={'floats': 2}):
+            answer, _ = chat.answer_question('Summarise', api_key=key, model='meta-llama/llama-3.3-70b-instruct')
+            self.assertEqual(answer, 'Two floats.')
+            self.assertFalse(reserve.call_args.kwargs['shared'])
+            self.assertEqual(model.call_args.kwargs['api_key'], key)
+
+    def test_invalid_or_disallowed_visitor_key(self):
+        with patch.dict(os.environ, {'AI_ENABLED': 'false'}), patch('chat_service.generate') as generate:
+            self.assertIn('sk-or-', chat.answer_question('List floats', api_key='not-a-key\r\nX: y')[0])
+            with patch.dict(os.environ, {'ALLOW_USER_API_KEYS': 'false'}):
+                self.assertIn('disabled', chat.answer_question('List floats', api_key='sk-or-v1-' + 'c' * 64)[0])
+            generate.assert_not_called()
+
+    def test_rejected_key_message_never_echoes_key(self):
+        key = 'sk-or-v1-' + 'd' * 64
+        response = MagicMock(status_code=401)
+        response.__enter__.return_value = response
+        with patch.dict(os.environ, {'AI_ENABLED': 'false'}), patch('chat_service.reserve_request'), \
+             patch('chat_service.requests.post', return_value=response):
+            answer, _ = chat.answer_question('List floats', api_key=key)
+            self.assertIn('rejected', answer)
+            self.assertNotIn(key, answer)
+
+    def test_own_key_quota_is_separate_and_hourly(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+            'AI_QUOTA_DB': str(Path(folder) / 'quota.db'), 'AI_DAILY_REQUEST_LIMIT': '0',
+            'AI_USER_KEY_HOURLY_LIMIT': '2'}):
+            chat.reserve_request('visitor', shared=False)
+            chat.reserve_request('visitor', shared=False)
+            with self.assertRaises(chat.QuotaExceeded):
+                chat.reserve_request('visitor', shared=False)
+            with self.assertRaises(chat.QuotaExceeded):
+                chat.reserve_request('visitor')
+
     def test_bedrock_converse_request(self):
         client = MagicMock()
         client.converse.return_value = {'output': {'message': {'content': [{'text': 'answer'}]}}}

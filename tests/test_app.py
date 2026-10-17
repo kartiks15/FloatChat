@@ -45,6 +45,29 @@ class DashboardTests(unittest.TestCase):
         bgc = app.build_bgc_chart(1, rows)
         self.assertEqual({trace.xaxis for trace in bgc.data}, {'x', 'x2', 'x3'})
 
+    def test_bgc_chart_only_shows_measured_variables(self):
+        rows = [dict(pres=10, doxy=None, chla=0.4, nitrate=None, bbp700=None, source_file='b.nc', source_profile=0)]
+        fig = app.build_bgc_chart(1, rows)
+        self.assertEqual(len(fig.data), 1)
+        self.assertEqual([a.text for a in fig.layout.annotations], ['Chlorophyll-a (mg/m³)'])
+        empty = app.build_bgc_chart(1, [dict(pres=10, source_file='c.nc', source_profile=0)])
+        self.assertIn('No biogeochemical', empty.layout.annotations[0].text)
+
+    def test_map_keeps_selection_trace_slots_and_frames_data(self):
+        profiles = [dict(latitude=lat, longitude=lon, wmo_id='1', date_utc=None, temp_max=20, profile_id=i)
+                    for i, (lat, lon) in enumerate([(10, 60), (20, 80)])]
+        fig = app.build_map(profiles, trajectory=[], selected=None)
+        self.assertEqual(len(fig.data), 4)
+        self.assertAlmostEqual(fig.layout.map.center.lon, 70)
+        self.assertGreater(fig.layout.map.zoom, 2)
+
+    def test_float_list_search_and_selection(self):
+        floats = [dict(wmo_id='2902115', dac='IN', n_profiles=238, first='2013-11-24', last='2017-10-09'),
+                  dict(wmo_id='5906539', dac='AO', n_profiles=145, first='2022-11-02', last='2026-10-12')]
+        items, caption = app.render_float_list(floats, 'ao', '5906539')
+        self.assertEqual(caption, '1 of 2 floats')
+        self.assertIn('is-selected', items[0].className)
+
 
 if __name__ == '__main__':
     unittest.main()

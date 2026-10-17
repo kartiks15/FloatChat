@@ -274,7 +274,37 @@ then run `docker compose up -d proxy`. Caddy gets the new certificate automatica
 
 ## Open-weight inference
 
-### Recommended hosted option: Qwen on Bedrock
+### Easiest option: OpenRouter, with visitors' own keys
+
+Nothing to configure: with the default `ALLOW_USER_API_KEYS=true`, the **Ask AI** tab
+has an **AI settings** panel. A visitor pastes their own OpenRouter key
+([openrouter.ai/keys](https://openrouter.ai/keys)) and picks one of four open-weight
+models: Qwen3 235B (default), Llama 3.3 70B, Mistral Small 3.2, or a free,
+rate-limited Gemma 4. Their usage is billed to their OpenRouter account, not yours.
+
+- The key is saved in the visitor's browser tab (session storage) by browser code and
+  is cleared when the tab closes. It is sent to the server only with each question,
+  over HTTPS, used for that one OpenRouter request, and never logged or stored.
+- The OpenRouter URL is fixed in code, and the model must be on the allowlist.
+  Visitors can't redirect requests elsewhere or choose an expensive model.
+- Requests made with a visitor's key skip your shared daily limit, but keep a
+  per-IP limit (`AI_USER_KEY_HOURLY_LIMIT`, default 30 per hour) to protect the server.
+- Set `ALLOW_USER_API_KEYS=false` in `.env` to hide the panel.
+
+To pay for the chat yourself instead, add a server key to `.env`, then run
+`docker compose up -d app`:
+
+```dotenv
+AI_ENABLED=true
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-your-key
+OPENROUTER_MODEL=qwen/qwen3-235b-a22b-2507
+AI_DAILY_REQUEST_LIMIT=20
+```
+
+Set a credit limit on that key in OpenRouter; the app's limits count requests, not dollars.
+
+### Hosted option on AWS: Qwen on Bedrock
 
 The implementation uses boto3's **Converse** API and the open-weight Qwen model,
 without the OpenAI SDK or OpenAI endpoints. Qwen3 32B is currently listed as

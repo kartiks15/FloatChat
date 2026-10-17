@@ -1,22 +1,24 @@
 """
-FloatChat — AI-Powered ARGO Ocean Data Dashboard
-=================================================
-Full frontend: chat interface + geospatial map + depth profiles + BGC charts.
+FloatChat — Argo ocean data dashboard
+=====================================
+A map of float profiles, a profile inspector (temperature/salinity, BGC and a
+T–S diagram) and an assistant that answers from fixed, read-only operations.
 
 Layout:
-  Left sidebar  — chat panel (NL query → agent → response)
-  Center        — Plotly map (float trajectories / scatter)
-  Right panel   — profile charts (T/S depth, BGC parameters)
+  Top bar       — dataset totals and the period filter
+  Left panel    — float catalogue, and the AI assistant with its settings
+  Centre        — Plotly map of profile locations and the selected trajectory
+  Right panel   — profile inspector charts
 
 Run:
     python app.py
 """
 
 import logging
+import math
 import os
 
-from dash import Dash, dcc, html, Input, Output, State, ctx, no_update, ALL
-import dash_bootstrap_components as dbc
+from dash import Dash, dcc, html, Input, Output, State, ctx, no_update, ALL, Patch, clientside_callback
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from flask import request, jsonify
@@ -24,10 +26,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from dotenv import load_dotenv
 
 from database import fetch_rows
-from chat_service import answer_question, ai_enabled, MAX_QUERY_CHARS
+from chat_service import answer_question, ai_enabled, user_keys_allowed, openrouter_models, MAX_QUERY_CHARS
 
 load_dotenv()
 log = logging.getLogger(__name__)
+
+MAP_PROFILE_LIMIT = 5000   # database.fetch_rows refuses larger results
+DATA_MODES = {"R": "Real-time", "A": "Real-time adjusted", "D": "Delayed mode"}
 
 
 def db_query(sql, params=None):
@@ -40,6 +45,12 @@ def get_profile_obs(profile_id):
         ORDER BY source_file, source_profile, pres LIMIT 5000""", [profile_id])
 
 
+def get_profile_meta(profile_id):
+    rows = db_query("""SELECT profile_id, wmo_id, cycle_number, direction, date_utc,
+        latitude, longitude, data_mode FROM profiles WHERE profile_id=%s""", [profile_id])
+    return rows[0] if rows else None
+
+
 def get_trajectory(wmo_id):
     return db_query("""SELECT profile_id, wmo_id, cycle_number, date_utc, latitude, longitude
         FROM profiles WHERE wmo_id=%s AND latitude BETWEEN -90 AND 90
@@ -50,119 +61,119 @@ def get_float_list():
     return db_query("""SELECT f.wmo_id, f.dac, COUNT(p.profile_id) n_profiles,
         MIN(p.date_utc) first_date, MAX(p.date_utc) last_date
         FROM floats f LEFT JOIN profiles p ON p.wmo_id=f.wmo_id
-        GROUP BY f.wmo_id, f.dac ORDER BY n_profiles DESC, f.wmo_id LIMIT 50""")
+        GROUP BY f.wmo_id, f.dac ORDER BY n_profiles DESC, f.wmo_id LIMIT 500""")
 
 
-# ── Color palette ──────────────────────────────────────────
-OCEAN_DARK   = "#040d1a"
-OCEAN_MID    = "#071a2e"
-OCEAN_CARD   = "#0a2240"
-OCEAN_BORDER = "#0e3060"
-ACCENT_CYAN  = "#00d4ff"
-ACCENT_TEAL  = "#00b4a0"
-ACCENT_WARM  = "#f0a500"
-TEXT_PRIMARY = "#e8f4fd"
-TEXT_MUTED   = "#7aacc8"
-GRADIENT_MAP = "Viridis"
+def fmt_date(value):
+    return str(value)[:10] if value else "—"
 
-# ── Plotly theme ───────────────────────────────────────────
-PLOTLY_THEME = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(4,13,26,0.6)",
-    font=dict(family="'Space Mono', monospace", color=TEXT_PRIMARY, size=11),
-    margin=dict(l=40, r=20, t=30, b=40),
-    xaxis=dict(gridcolor="#0e3060", zerolinecolor="#0e3060", color=TEXT_MUTED),
-    yaxis=dict(gridcolor="#0e3060", zerolinecolor="#0e3060", color=TEXT_MUTED),
+
+def fmt_position(lat, lon):
+    if lat is None or lon is None:
+        return "Position unknown"
+    return f"{abs(lat):.2f}°{'N' if lat >= 0 else 'S'}, {abs(lon):.2f}°{'E' if lon >= 0 else 'W'}"
+
+
+# ── Design tokens (mirrored in assets/style.css) ───────────
+FONT = "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+SURFACE_2 = "#182235"
+BORDER = "#243149"
+GRID = "#1d283b"
+INK = "#e8edf5"
+INK_2 = "#aab4c3"
+MUTED = "#7d8899"
+ACCENT = "#3987e5"
+PROFILE_DOT = "#8ea2bf"
+# Validated with the dataviz palette checks against the #111827 panel surface.
+COLORS = {"temp": "#d95926", "psal": "#3987e5", "doxy": "#3987e5",
+          "chla": "#199e70", "nitrate": "#9085e9", "bbp700": "#d55181"}
+PRESSURE_SCALE = [[0, "#b7d3f6"], [0.5, "#5598e7"], [1, "#1c5cab"]]  # one hue, shallow → deep
+BGC_VARIABLES = [("doxy", "Oxygen (µmol/kg)"), ("chla", "Chlorophyll-a (mg/m³)"),
+                 ("nitrate", "Nitrate (µmol/kg)"), ("bbp700", "Backscatter 700 nm (m⁻¹)")]
+
+AXIS = dict(gridcolor=GRID, linecolor=BORDER, zeroline=False,
+            tickfont=dict(color=MUTED, size=11), title=dict(font=dict(color=INK_2, size=12)))
+BASE_LAYOUT = dict(
+    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(family=FONT, color=INK_2, size=12),
+    margin=dict(l=56, r=16, t=36, b=44),
+    hoverlabel=dict(bgcolor=SURFACE_2, bordercolor=BORDER, font=dict(family=FONT, color=INK, size=12)),
 )
 
-# ── Build figures ──────────────────────────────────────────
-def build_map(profiles, selected_wmo=None):
+
+# ── Figures ────────────────────────────────────────────────
+def placeholder_figure(message, height=200):
     fig = go.Figure()
-
-    if not profiles:
-        fig.update_layout(
-            **PLOTLY_THEME,
-            map=dict(style="carto-darkmatter", center=dict(lat=15, lon=72), zoom=3),
-            height=480,
-        )
-        return fig
-
-    lats  = [p["latitude"]  for p in profiles]
-    lons  = [p["longitude"] for p in profiles]
-    wmos  = [p["wmo_id"]    for p in profiles]
-    dates = [str(p["date_utc"])[:10] if p["date_utc"] else "" for p in profiles]
-    temps = [p.get("temp_max") for p in profiles]
-    texts = [f"WMO: {w}<br>Date: {d}<br>T_max: {t:.1f}°C" if t is not None else f"WMO: {w}<br>Date: {d}<br>Temperature unavailable"
-             for w, d, t in zip(wmos, dates, temps)]
-
-    fig.add_trace(go.Scattermap(
-        lat=lats, lon=lons, mode="markers",
-        marker=dict(size=7, color=[t if t is not None else "#7aacc8" for t in temps], colorscale="Thermal",
-                    colorbar=dict(title="T max °C", thickness=10, len=0.5,
-                                  tickfont=dict(color=TEXT_MUTED, size=9)),
-                    opacity=0.85),
-        text=texts, hoverinfo="text",
-        customdata=[[p["profile_id"], p["wmo_id"]] for p in profiles],
-        name="Profiles",
-    ))
-
-    # Highlight selected float trajectory
-    if selected_wmo:
-        traj = get_trajectory(selected_wmo)
-        if traj:
-            fig.add_trace(go.Scattermap(
-                lat=[t["latitude"] for t in traj],
-                lon=[t["longitude"] for t in traj],
-                mode="lines+markers",
-                line=dict(width=2, color=ACCENT_CYAN),
-                marker=dict(size=5, color=ACCENT_CYAN),
-                name=f"WMO {selected_wmo}",
-                customdata=[[t["profile_id"], t["wmo_id"]] for t in traj],
-            ))
-
-    fig.update_layout(
-        **PLOTLY_THEME,
-        map=dict(style="carto-darkmatter",
-                    center=dict(lat=sum(lats)/len(lats), lon=sum(lons)/len(lons)),
-                    zoom=3),
-        height=480,
-        showlegend=bool(selected_wmo),
-        legend=dict(bgcolor="rgba(10,34,64,0.8)", bordercolor=OCEAN_BORDER,
-                    font=dict(color=TEXT_PRIMARY, size=10)),
-    )
+    fig.update_layout(**BASE_LAYOUT, height=height, xaxis=dict(visible=False), yaxis=dict(visible=False))
+    fig.add_annotation(text=message, x=0.5, y=0.5, xref="paper", yref="paper",
+                       showarrow=False, font=dict(color=MUTED, size=13))
     return fig
 
 
-def build_profile_chart(profile_id, obs=None):
-    obs = get_profile_obs(profile_id) if obs is None else obs
-    if not obs:
-        return go.Figure().update_layout(**PLOTLY_THEME, height=320,
-            title=dict(text="No observations found", font=dict(color=TEXT_MUTED)))
+def style_subplots(fig, height):
+    fig.update_xaxes(**AXIS)
+    fig.update_yaxes(**AXIS, autorange="reversed")
+    fig.update_yaxes(title_text="Pressure (dbar)", col=1)
+    fig.update_annotations(font=dict(color=INK, size=12))
+    fig.update_layout(**BASE_LAYOUT, height=height, showlegend=False)
+    fig.update_layout(margin=dict(l=60, r=12, t=34, b=36))
+    return fig
 
-    fig = go.Figure()
-    for group_index, (source, rows) in enumerate(observation_groups(obs).items()):
-        for key, label, color, axis in [("temp", "Temperature (°C)", ACCENT_WARM, "x"),
-                                        ("psal", "Salinity (PSU)", ACCENT_CYAN, "x2")]:
-            fig.add_trace(go.Scatter(x=[r.get(key) for r in rows], y=[r["pres"] for r in rows],
-                mode="lines+markers", name=label, legendgroup=key, showlegend=group_index == 0,
-                line=dict(color=color, width=2), marker=dict(size=3), xaxis=axis,
-                text=[source] * len(rows), hovertemplate="%{x}<br>%{y} dbar<br>%{text}<extra></extra>"))
 
-    theme_base = {k: v for k, v in PLOTLY_THEME.items() if k not in ['xaxis', 'yaxis']}
-    xaxis_custom = {**PLOTLY_THEME["xaxis"], "title": "Temperature °C", "color": ACCENT_WARM}
-    yaxis_custom = {**PLOTLY_THEME["yaxis"], "autorange": "reversed", "title": "Pressure (dbar)"}
-    fig.update_layout(
-        **theme_base,
-        height=320,
-        title=dict(text=f"Profile #{profile_id} — T/S vs Pressure",
-                   font=dict(color=TEXT_PRIMARY, size=12)),
-        yaxis=yaxis_custom,
-        xaxis=xaxis_custom,
-        xaxis2=dict(title="Salinity PSU", color=ACCENT_CYAN,
-                    overlaying="x", side="top", gridcolor="rgba(0,0,0,0)"),
-        legend=dict(bgcolor="rgba(10,34,64,0.7)", bordercolor=OCEAN_BORDER,
-                    font=dict(color=TEXT_PRIMARY, size=10), x=0.65, y=0.98),
-    )
+def map_view(lats, lons):
+    """Centre and zoom that frame the given points; the Indian Ocean when empty."""
+    if not lats:
+        return dict(lat=5, lon=75), 2.2
+    lat0, lat1, lon0, lon1 = min(lats), max(lats), min(lons), max(lons)
+    # A 512 px world at zoom 0; leave margin for a ~640 px wide map.
+    span = max(lon1 - lon0, (lat1 - lat0) * 1.4, 2.0)
+    zoom = max(0.8, min(7.5, math.log2(380 / span)))
+    return dict(lat=(lat0 + lat1) / 2, lon=(lon0 + lon1) / 2), zoom
+
+
+def trajectory_trace(traj):
+    return go.Scattermap(
+        lat=[t["latitude"] for t in traj], lon=[t["longitude"] for t in traj],
+        mode="lines+markers", line=dict(width=2, color=ACCENT), marker=dict(size=6, color=ACCENT),
+        customdata=[[t["profile_id"], t["wmo_id"]] for t in traj],
+        text=[f"WMO {t['wmo_id']} · cycle {t['cycle_number']}<br>{fmt_date(t['date_utc'])}" for t in traj],
+        hovertemplate="%{text}<extra></extra>", name="Selected float")
+
+
+def selection_traces(meta):
+    """A light halo under an accent dot marks the profile shown in the inspector."""
+    lat = [meta["latitude"]] if meta and meta.get("latitude") is not None and meta.get("longitude") is not None else []
+    lon = [meta["longitude"]] if lat else []
+    return [go.Scattermap(lat=lat, lon=lon, mode="markers", hoverinfo="skip", name="halo",
+                          marker=dict(size=18, color=INK, opacity=0.9)),
+            go.Scattermap(lat=lat, lon=lon, mode="markers", hoverinfo="skip", name="Selected profile",
+                          marker=dict(size=10, color=ACCENT))]
+
+
+def build_map(profiles, selected_wmo=None, trajectory=None, selected=None):
+    """Trace order is fixed (profiles, trajectory, halo, dot) so selection can be patched."""
+    lats = [p["latitude"] for p in profiles]
+    lons = [p["longitude"] for p in profiles]
+    texts = []
+    for p in profiles:
+        t = p.get("temp_max")
+        temp = f"Max temperature {t:.1f} °C" if t is not None else "Temperature unavailable"
+        texts.append(f"WMO {p['wmo_id']} · {fmt_date(p['date_utc'])}<br>{temp}")
+    fig = go.Figure(go.Scattermap(
+        lat=lats, lon=lons, mode="markers", name="Profiles",
+        marker=dict(size=7, color=PROFILE_DOT, opacity=0.55),
+        text=texts, hovertemplate="%{text}<extra></extra>",
+        customdata=[[p["profile_id"], p["wmo_id"]] for p in profiles]))
+    traj = trajectory if trajectory is not None else (get_trajectory(selected_wmo) if selected_wmo else [])
+    fig.add_trace(trajectory_trace(traj))
+    fig.add_traces(selection_traces(selected))
+    if traj:
+        center, zoom = map_view([t["latitude"] for t in traj], [t["longitude"] for t in traj])
+    else:
+        center, zoom = map_view(lats, lons)
+    fig.update_layout(**BASE_LAYOUT)
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), showlegend=False, uirevision="map",
+                      map=dict(style="carto-darkmatter", center=center, zoom=zoom))
     return fig
 
 
@@ -175,35 +186,53 @@ def observation_groups(obs):
     return groups
 
 
+def profile_line(rows, key, source):
+    # Separate source grids stay separate traces so they are never joined. Within one
+    # grid, connect the levels where this variable was measured: merged (Sprof) grids
+    # leave the other levels empty, which would otherwise break the line into dots.
+    rows = [r for r in rows if r.get(key) is not None]
+    return go.Scatter(x=[r[key] for r in rows], y=[r["pres"] for r in rows],
+                      mode="lines" if len(rows) > 1 else "markers",
+                      line=dict(color=COLORS[key], width=2), marker=dict(color=COLORS[key], size=6),
+                      text=[source] * len(rows), showlegend=False,
+                      hovertemplate="%{x:.3f} at %{y:.0f} dbar<br>%{text}<extra></extra>")
+
+
+def build_profile_chart(profile_id, obs=None):
+    obs = get_profile_obs(profile_id) if obs is None else obs
+    groups = observation_groups(obs)
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.07,
+                        subplot_titles=("Temperature (°C)", "Salinity (PSU)"))
+    for source, rows in groups.items():
+        for col, key in ((1, "temp"), (2, "psal")):
+            if any(r.get(key) is not None for r in rows):
+                fig.add_trace(profile_line(rows, key, source), row=1, col=col)
+    if not fig.data:
+        return placeholder_figure("No temperature or salinity in this profile", height=140)
+    return style_subplots(fig, 320)
+
+
 def build_bgc_chart(profile_id, obs=None):
     obs = get_profile_obs(profile_id) if obs is None else obs
-    variables = [("doxy", ACCENT_CYAN, "O₂ μmol/kg"),
-                 ("chla", "#00ff9d", "Chl-a mg/m³"),
-                 ("nitrate", ACCENT_WARM, "NO₃ μmol/kg")]
-    # Different units need independent axes; separate grids must not be connected.
-    fig = make_subplots(rows=1, cols=3, shared_yaxes=True, horizontal_spacing=0.09)
-    has_data = False
-    for column, (key, color, label) in enumerate(variables, 1):
-        for source, rows in observation_groups(obs).items():
-            if any(row.get(key) is not None for row in rows):
-                has_data = True
-                fig.add_trace(go.Scatter(x=[r.get(key) for r in rows], y=[r["pres"] for r in rows],
-                    mode="lines+markers", line=dict(color=color, width=2), marker=dict(size=3),
-                    showlegend=False, text=[source] * len(rows),
-                    hovertemplate="%{x}<br>%{y} dbar<br>%{text}<extra></extra>"), row=1, col=column)
-        fig.update_xaxes(title_text=label, gridcolor=OCEAN_BORDER, row=1, col=column)
-    fig.update_yaxes(autorange="reversed", gridcolor=OCEAN_BORDER)
-    fig.update_yaxes(title_text="Pressure (dbar)", row=1, col=1)
-    if not has_data:
-        fig.add_annotation(text="No BGC measurements for this profile", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False)
-    fig.update_layout(**{k:v for k,v in PLOTLY_THEME.items() if k not in ("xaxis", "yaxis")},
-                      height=300, title=dict(text=f"Profile #{profile_id} — BGC", font=dict(size=12)))
-    return fig
+    groups = observation_groups(obs)
+    present = [(key, label) for key, label in BGC_VARIABLES
+               if any(r.get(key) is not None for rows in groups.values() for r in rows)]
+    if not present:
+        return placeholder_figure("No biogeochemical measurements in this profile", height=120)
+    # Different units need independent axes; two panels per row keeps them readable.
+    n_rows = 1 if len(present) <= 2 else 2
+    n_cols = min(len(present), 2)
+    fig = make_subplots(rows=n_rows, cols=n_cols, shared_yaxes=True, horizontal_spacing=0.08,
+                        vertical_spacing=0.16, subplot_titles=[label for _, label in present])
+    for index, (key, _) in enumerate(present):
+        for source, rows in groups.items():
+            if any(r.get(key) is not None for r in rows):
+                fig.add_trace(profile_line(rows, key, source), row=index // 2 + 1, col=index % 2 + 1)
+    return style_subplots(fig, 300 if n_rows == 1 else 520)
 
 
 def build_ts_diagram(wmo_id=None):
-    """Temperature–Salinity scatter diagram."""
+    """Temperature–salinity scatter for one float, or the latest levels overall."""
     sql = """
         SELECT o.temp, o.psal, o.pres, o.wmo_id
         FROM observations o
@@ -215,43 +244,29 @@ def build_ts_diagram(wmo_id=None):
         params.append(wmo_id)
     sql += " ORDER BY o.profile_id DESC, o.pres LIMIT 5000"
     rows = db_query(sql, params or None)
-
-    fig = go.Figure()
-    if rows:
-        fig.add_trace(go.Scatter(
-            x=[r["psal"] for r in rows],
-            y=[r["temp"] for r in rows],
-            mode="markers",
-            marker=dict(size=3, color=[r["pres"] for r in rows],
-                        colorscale="Viridis", opacity=0.6,
-                        colorbar=dict(title="Pressure (dbar)", thickness=10, len=0.6,
-                                      tickfont=dict(color=TEXT_MUTED, size=9))),
-            hovertemplate="S: %{x:.2f} PSU<br>T: %{y:.2f}°C<extra></extra>",
-        ))
-
-    theme_base = {k: v for k, v in PLOTLY_THEME.items() if k not in ['xaxis', 'yaxis']}
-    xaxis_custom = {**PLOTLY_THEME["xaxis"], "title": "Salinity (PSU)"}
-    yaxis_custom = {**PLOTLY_THEME["yaxis"], "title": "Temperature (°C)"}
-    fig.update_layout(
-        **theme_base,
-        height=280,
-        title=dict(text="T–S Diagram" + (f" — WMO {wmo_id}" if wmo_id else " — latest 5,000 levels"),
-                   font=dict(color=TEXT_PRIMARY, size=12)),
-        xaxis=xaxis_custom,
-        yaxis=yaxis_custom,
-    )
+    if not rows:
+        return placeholder_figure("No paired temperature and salinity yet", height=140)
+    fig = go.Figure(go.Scatter(
+        x=[r["psal"] for r in rows], y=[r["temp"] for r in rows], mode="markers",
+        marker=dict(size=4, opacity=0.75, color=[r["pres"] for r in rows], colorscale=PRESSURE_SCALE,
+                    colorbar=dict(title=dict(text="dbar", font=dict(color=INK_2, size=11)),
+                                  thickness=8, len=0.8, outlinewidth=0,
+                                  tickfont=dict(color=MUTED, size=10))),
+        hovertemplate="%{x:.2f} PSU · %{y:.2f} °C<br>%{marker.color:.0f} dbar<extra></extra>"))
+    fig.update_xaxes(**AXIS, title_text="Salinity (PSU)")
+    fig.update_yaxes(**AXIS, title_text="Temperature (°C)")
+    fig.update_layout(**BASE_LAYOUT, height=300)
+    fig.update_layout(margin=dict(l=60, r=12, t=12, b=44))
     return fig
 
 
-# ── App layout ─────────────────────────────────────────────
+# ── App ─────────────────────────────────────────────────────
 app = Dash(
     __name__,
-    external_stylesheets=[
-        dbc.themes.BOOTSTRAP,
-        "https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;800&display=swap",
-    ],
-    title="FloatChat | Ocean Explorer",
-    update_title="Exploring…",
+    external_stylesheets=["https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"],
+    title="FloatChat · Argo ocean explorer",
+    update_title=None,
+    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
 )
 server = app.server
 server.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
@@ -282,309 +297,185 @@ def security_headers(response):
     return response
 
 
-# ── Styles ─────────────────────────────────────────────────
-STYLES = {
-    "app": {
-        "minHeight": "100vh",
-        "background": f"linear-gradient(135deg, {OCEAN_DARK} 0%, #051525 50%, {OCEAN_MID} 100%)",
-        "fontFamily": "'Space Mono', monospace",
-        "color": TEXT_PRIMARY,
-        "overflow": "hidden",
-    },
-    "header": {
-        "background": f"linear-gradient(90deg, {OCEAN_DARK}, {OCEAN_MID})",
-        "borderBottom": f"1px solid {OCEAN_BORDER}",
-        "padding": "12px 24px",
-        "display": "flex",
-        "alignItems": "center",
-        "gap": "16px",
-    },
-    "logo": {
-        "fontSize": "22px",
-        "fontFamily": "'Syne', sans-serif",
-        "fontWeight": "800",
-        "color": ACCENT_CYAN,
-        "letterSpacing": "-0.5px",
-    },
-    "tagline": {
-        "fontSize": "11px",
-        "color": TEXT_MUTED,
-        "letterSpacing": "2px",
-        "textTransform": "uppercase",
-        "marginLeft": "4px",
-    },
-    "sidebar": {
-        "width": "340px",
-        "minWidth": "340px",
-        "background": OCEAN_CARD,
-        "borderRight": f"1px solid {OCEAN_BORDER}",
-        "display": "flex",
-        "flexDirection": "column",
-        "height": "calc(100vh - 56px)",
-    },
-    "chat_box": {
-        "flex": "1",
-        "overflowY": "auto",
-        "padding": "16px",
-        "display": "flex",
-        "flexDirection": "column",
-        "gap": "12px",
-    },
-    "input_row": {
-        "padding": "12px 16px",
-        "borderTop": f"1px solid {OCEAN_BORDER}",
-        "background": OCEAN_DARK,
-        "display": "flex",
-        "gap": "8px",
-        "alignItems": "center",
-    },
-    "chat_input": {
-        "flex": "1",
-        "background": "rgba(0,212,255,0.06)",
-        "border": f"1px solid {OCEAN_BORDER}",
-        "borderRadius": "8px",
-        "color": TEXT_PRIMARY,
-        "fontSize": "12px",
-        "padding": "10px 14px",
-        "fontFamily": "'Space Mono', monospace",
-        "outline": "none",
-    },
-    "send_btn": {
-        "background": f"linear-gradient(135deg, {ACCENT_TEAL}, {ACCENT_CYAN})",
-        "border": "none",
-        "borderRadius": "8px",
-        "color": OCEAN_DARK,
-        "fontWeight": "700",
-        "fontSize": "12px",
-        "padding": "10px 18px",
-        "cursor": "pointer",
-        "fontFamily": "'Space Mono', monospace",
-        "whiteSpace": "nowrap",
-    },
-    "center_panel": {
-        "flex": "1",
-        "display": "flex",
-        "flexDirection": "column",
-        "height": "calc(100vh - 56px)",
-        "overflow": "hidden",
-    },
-    "map_header": {
-        "padding": "12px 20px 8px",
-        "borderBottom": f"1px solid {OCEAN_BORDER}",
-        "display": "flex",
-        "alignItems": "center",
-        "gap": "12px",
-        "background": "rgba(4,13,26,0.4)",
-    },
-    "right_panel": {
-        "width": "360px",
-        "minWidth": "360px",
-        "background": OCEAN_CARD,
-        "borderLeft": f"1px solid {OCEAN_BORDER}",
-        "display": "flex",
-        "flexDirection": "column",
-        "height": "calc(100vh - 56px)",
-        "overflowY": "auto",
-    },
-    "card": {
-        "background": "rgba(7,26,46,0.8)",
-        "border": f"1px solid {OCEAN_BORDER}",
-        "borderRadius": "10px",
-        "padding": "14px",
-        "marginBottom": "12px",
-    },
-    "stat_badge": {
-        "background": "rgba(0,212,255,0.1)",
-        "border": f"1px solid {ACCENT_CYAN}33",
-        "borderRadius": "6px",
-        "padding": "4px 10px",
-        "fontSize": "10px",
-        "color": ACCENT_CYAN,
-        "letterSpacing": "1px",
-    },
-    "section_label": {
-        "fontSize": "9px",
-        "fontWeight": "700",
-        "color": TEXT_MUTED,
-        "letterSpacing": "2px",
-        "textTransform": "uppercase",
-        "marginBottom": "8px",
-    },
-    "float_item": {
-        "display": "flex",
-        "justifyContent": "space-between",
-        "alignItems": "center",
-        "padding": "8px 12px",
-        "borderRadius": "6px",
-        "cursor": "pointer",
-        "marginBottom": "4px",
-        "fontSize": "11px",
-        "transition": "background 0.2s",
-    },
-}
+# ── Components ──────────────────────────────────────────────
+SUGGESTIONS = ["Summarise the dataset", "List floats from INCOIS", "Profiles near 12°N 72°E"]
 
 
 def chat_bubble(text, role="assistant"):
-    is_user = role == "user"
-    return html.Div([
-        html.Div(
-            "YOU" if is_user else "FLOAT·AI",
-            style={"fontSize": "9px", "fontWeight": "700", "letterSpacing": "2px",
-                   "color": ACCENT_WARM if is_user else ACCENT_CYAN,
-                   "marginBottom": "4px", "textAlign": "right" if is_user else "left"}
-        ),
-        html.Div(
-            text,
-            style={
-                "background": f"rgba(240,165,0,0.08)" if is_user else f"rgba(0,212,255,0.06)",
-                "border": f"1px solid {'rgba(240,165,0,0.25)' if is_user else 'rgba(0,212,255,0.15)'}",
-                "borderRadius": "10px",
-                "padding": "10px 14px",
-                "fontSize": "12px",
-                "lineHeight": "1.6",
-                "color": TEXT_PRIMARY,
-                "whiteSpace": "pre-wrap",
-                "wordBreak": "break-word",
-                "marginLeft": "24px" if is_user else "0",
-                "marginRight": "0" if is_user else "24px",
-            }
-        )
-    ], style={"display": "flex", "flexDirection": "column",
-              "alignItems": "flex-end" if is_user else "flex-start"})
+    if role == "user":
+        return html.Div(text, className="msg msg-user")
+    return dcc.Markdown(text, className="msg msg-ai", link_target="_blank")
 
 
-def stat_pill(label, value, color=ACCENT_CYAN):
-    return html.Div([
-        html.Div(label, style={"fontSize": "9px", "color": TEXT_MUTED, "letterSpacing": "1px"}),
-        html.Div(str(value), style={"fontSize": "16px", "fontWeight": "700",
-                                     "fontFamily": "'Syne', sans-serif", "color": color}),
-    ], style={"background": f"rgba(0,0,0,0.3)", "border": f"1px solid {OCEAN_BORDER}",
-              "borderRadius": "8px", "padding": "10px 14px", "flex": "1"})
+def stat_tile(label, value):
+    return html.Div([html.Div(label, className="stat-label"), html.Div(value, className="stat-value")],
+                    className="stat")
+
+
+def kpi(value, label):
+    return html.Div([html.Span(value, className="kpi-value"), html.Span(label, className="kpi-label")],
+                    className="kpi")
+
+
+def float_item(f, selected):
+    span = f"{f['first'][:4]}–{f['last'][:4]}" if f.get("first") and f.get("last") else "No profiles"
+    return html.Button([
+        html.Span(f["wmo_id"], className="float-wmo"),
+        html.Span(f"{f['dac'] or '—'} · {f['n_profiles']:,} profiles", className="float-meta"),
+        html.Span(span, className="float-span"),
+    ], id={"type": "float-item", "index": f["wmo_id"]}, n_clicks=0,
+        className="float-item is-selected" if selected else "float-item")
+
+
+def welcome_message():
+    if ai_enabled():
+        access = "The assistant is on. "
+    elif user_keys_allowed():
+        access = "To chat, add your own OpenRouter API key under **AI settings** above. "
+    else:
+        access = "The assistant is off for this demo. "
+    return ("Ask about the Argo floats in this database: where they went, what they measured, "
+            "and individual profiles. Answers come only from the stored measurements.\n\n" + access +
+            "The map and charts work without it.")
+
+
+def ai_settings():
+    # Always rendered so callbacks can reference every field; hidden when it has no use.
+    own_keys = user_keys_allowed()
+    useful = own_keys or os.getenv("AI_PROVIDER", "").lower() == "openrouter"
+    models = openrouter_models()
+    return html.Details([
+        html.Summary([html.Span("AI settings"), html.Span(id="ai-status", className="ai-status")]),
+        html.Div([
+            html.Div([
+                html.Label("OpenRouter API key", htmlFor="api-key-input", className="field-label"),
+                html.Div([
+                    dcc.Input(id="api-key-input", type="password", placeholder="sk-or-…",
+                              autoComplete="off", className="text-input", debounce=False),
+                    html.Button("Save", id="save-key-btn", n_clicks=0, className="btn btn-primary"),
+                    html.Button("Remove", id="clear-key-btn", n_clicks=0, className="btn btn-ghost"),
+                ], className="key-row"),
+                html.Div(id="key-feedback", className="field-help", role="status"),
+            ], hidden=not own_keys),
+            html.Label("Model", htmlFor="model-select", className="field-label"),
+            dcc.Dropdown(id="model-select", options=[{"label": label, "value": value} for value, label in models.items()],
+                         value=next(iter(models)), clearable=False, searchable=False, className="dd"),
+            html.P(["Your key stays in this browser tab and is sent only with your questions, over HTTPS. "
+                    "The server never stores it. Usage is billed to your OpenRouter account. ",
+                    html.A("Get a key", href="https://openrouter.ai/keys", target="_blank", rel="noopener")],
+                   className="field-help", hidden=not own_keys),
+        ], className="settings-body"),
+    ], className="ai-settings", id="ai-settings", hidden=not useful)
 
 
 # ── Layout ──────────────────────────────────────────────────
 app.layout = html.Div([
-    # State stores
     dcc.Store(id="chat-history", data=[]),
     dcc.Store(id="selected-profile", data=None),
     dcc.Store(id="selected-wmo", data=None),
-    dcc.Store(id="all-profiles", data=[]),
+    dcc.Store(id="float-data", data=[]),
     dcc.Store(id="chat-selection", data=None),
+    dcc.Store(id="api-key-store", storage_type="session"),
+    dcc.Store(id="server-ai", data={"enabled": ai_enabled()}),
 
-    # Header
-    html.Div([
-        html.Div("⬡ FloatChat", style=STYLES["logo"]),
-        html.Div("ARGO OCEAN INTELLIGENCE PLATFORM", style=STYLES["tagline"]),
-        html.Div(style={"flex": "1"}),
-        html.Div(id="db-status", style={"fontSize": "10px", "color": TEXT_MUTED}),
-    ], style=STYLES["header"]),
-
-    # Body
-    html.Div([
-
-        # ── Left: Chat sidebar ──────────────────────────────
+    html.Header([
         html.Div([
-            # Float selector
-            html.Div([
-                html.Div("FLOAT CATALOGUE", style=STYLES["section_label"]),
-                html.Div(id="float-list-panel", style={"maxHeight": "180px", "overflowY": "auto"}),
-            ], style={"padding": "14px 16px", "borderBottom": f"1px solid {OCEAN_BORDER}"}),
-
-            # Chat messages
-            html.Div(id="chat-messages", style=STYLES["chat_box"], children=[
-                chat_bubble(
-                    "Explore the ocean through real ARGO float measurements.\n\n"
-                    "Try asking:\n"
-                    "• Show salinity profiles near 12°N 72°E\n"
-                    "• List floats from INCOIS\n"
-                    "• Show profile 1\n\n"
-                    + ("Open-weight AI is enabled." if ai_enabled() else "AI is off. The map and profile explorer are available."),
-                    role="assistant"
-                )
-            ]),
-
-            # Input row
-            html.Div([
-                dcc.Input(
-                    id="chat-input",
-                    type="text",
-                    placeholder="Ask about ocean data...",
-                    debounce=False,
-                    n_submit=0,
-                    maxLength=MAX_QUERY_CHARS,
-                    style=STYLES["chat_input"],
-                ),
-                html.Button("SEND", id="send-btn", n_clicks=0, style=STYLES["send_btn"]),
-            ], style=STYLES["input_row"]),
-
-            dcc.Loading(html.Div(id="agent-loading"), type="dot",
-                        color=ACCENT_CYAN, style={"height": "4px"}),
-
-        ], style=STYLES["sidebar"], className="sidebar"),
-
-        # ── Center: Map ─────────────────────────────────────
+            html.Div("F", className="brand-mark", **{"aria-hidden": "true"}),
+            html.Div([html.Div("FloatChat", className="brand-name"),
+                      html.Div("Argo ocean explorer", className="brand-sub")]),
+        ], className="brand"),
+        html.Div(id="kpis", className="kpis"),
         html.Div([
+            html.Label("Period", htmlFor="date-filter"),
+            dcc.Dropdown(
+                id="date-filter",
+                options=[
+                    {"label": "All time", "value": "all"},
+                    {"label": "Last 30 days of data", "value": "30"},
+                    {"label": "Last 90 days of data", "value": "90"},
+                    {"label": "Last 180 days of data", "value": "180"},
+                    {"label": "Last year of data", "value": "365"},
+                ],
+                value="all", clearable=False, searchable=False, className="dd",
+            ),
+        ], className="period"),
+    ], className="topbar"),
+
+    html.Main([
+        # Left: floats and assistant
+        html.Aside([
             html.Div([
-                html.Div("FLOAT TRAJECTORIES & PROFILE LOCATIONS", style=STYLES["section_label"]),
-                html.Div(id="map-stats", style={"display": "flex", "gap": "8px"}),
-                html.Div(style={"flex": "1"}),
+                html.Button("Floats", id="tab-floats", n_clicks=0, className="tab is-active", role="tab"),
+                html.Button("Ask AI", id="tab-chat", n_clicks=0, className="tab", role="tab"),
+            ], className="tabs", role="tablist"),
+
+            html.Div([
+                dcc.Input(id="float-search", type="search", placeholder="Search WMO or data centre",
+                          debounce=False, className="text-input search"),
+                html.Div(id="float-count", className="list-caption"),
+                html.Div(id="float-list", className="float-list"),
+            ], id="pane-floats", className="pane"),
+
+            html.Div([
+                ai_settings(),
+                html.Div([chat_bubble(welcome_message())], id="chat-messages", className="messages",
+                         **{"aria-live": "polite"}),
+                html.Div([html.Button(text, id={"type": "suggestion", "index": i}, n_clicks=0, className="chip")
+                          for i, text in enumerate(SUGGESTIONS)], className="chips"),
+                dcc.Loading(html.Div(id="agent-loading"), type="dot", color=ACCENT, className="chat-loading"),
                 html.Div([
-                    html.Div("FILTER", style={**STYLES["section_label"], "marginBottom": "0", "marginRight": "8px"}),
-                    dcc.Dropdown(
-                        id="date-filter",
-                        options=[
-                            {"label": "All time",     "value": "all"},
-                            {"label": "Latest data: 30 days", "value": "30"},
-                            {"label": "Latest data: 90 days", "value": "90"},
-                            {"label": "Latest data: 180 days","value": "180"},
-                            {"label": "Latest data: 1 year",    "value": "365"},
-                        ],
-                        value="all",
-                        clearable=False,
-                        style={"width": "190px", "fontSize": "11px",
-                               "background": OCEAN_CARD, "color": TEXT_PRIMARY},
-                    ),
-                ], style={"display": "flex", "alignItems": "center"}),
-            ], style=STYLES["map_header"]),
+                    dcc.Input(id="chat-input", type="text", placeholder="Ask about the ocean data…",
+                              debounce=False, n_submit=0, maxLength=MAX_QUERY_CHARS, className="text-input"),
+                    html.Button("Send", id="send-btn", n_clicks=0, className="btn btn-primary"),
+                ], className="composer"),
+            ], id="pane-chat", className="pane is-hidden"),
+        ], className="panel sidebar"),
 
-            dcc.Graph(id="main-map", style={"flex": "1"},
-                      config={"scrollZoom": True, "displayModeBar": False}),
-        ], style=STYLES["center_panel"], className="center-panel"),
-
-        # ── Right: Profile charts ────────────────────────────
-        html.Div([
-            # Stats
+        # Centre: map
+        html.Section([
             html.Div([
-                html.Div("PROFILE INSPECTOR", style=STYLES["section_label"]),
-                html.Div(id="profile-meta", style={"fontSize": "11px", "color": TEXT_MUTED,
-                                                    "marginBottom": "10px"}),
-                html.Div(id="profile-stats-row", style={"display": "flex", "gap": "8px",
-                                                          "marginBottom": "12px"}),
-            ], style={"padding": "14px 16px", "borderBottom": f"1px solid {OCEAN_BORDER}"}),
+                html.H2("Profile locations", className="panel-title"),
+                html.Div(id="db-status", className="panel-sub"),
+                html.Div("Click a dot to inspect a profile", className="hint"),
+            ], className="panel-head"),
+            dcc.Graph(id="main-map", className="map-graph", figure=build_map([]),
+                      config={"scrollZoom": True, "displayModeBar": False, "responsive": True}),
+        ], className="panel map-panel"),
 
-            # Charts
+        # Right: inspector
+        html.Aside([
             html.Div([
-                dcc.Graph(id="ts-profile-chart", config={"displayModeBar": False}),
-                dcc.Graph(id="bgc-chart",        config={"displayModeBar": False}),
-                dcc.Graph(id="ts-diagram",       config={"displayModeBar": False}),
-            ], style={"padding": "12px 8px", "overflowY": "auto"}),
-
-        ], style=STYLES["right_panel"], className="right-panel"),
-
-    ], style={"display": "flex", "flex": "1"}, className="dashboard-body"),
-
-], style=STYLES["app"])
+                html.H2("Profile inspector", className="panel-title"),
+                html.Div(id="profile-meta", className="profile-meta"),
+            ], className="panel-head stacked"),
+            html.Div([
+                html.Div(id="profile-stats-row", className="stats"),
+                html.Section([html.H3("Temperature and salinity", className="chart-title"),
+                              dcc.Graph(id="ts-profile-chart", config={"displayModeBar": False})],
+                             className="chart-block"),
+                html.Section([html.H3("Biogeochemistry", className="chart-title"),
+                              dcc.Graph(id="bgc-chart", config={"displayModeBar": False})],
+                             className="chart-block"),
+                html.Section([html.H3(id="ts-title", className="chart-title"),
+                              dcc.Graph(id="ts-diagram", config={"displayModeBar": False})],
+                             className="chart-block"),
+            ], className="inspector-body"),
+        ], className="panel inspector"),
+    ], className="layout"),
+], className="app")
 
 
 # ── Callbacks ───────────────────────────────────────────────
-
 @app.callback(
-    Output("float-list-panel", "children"),
-    Output("all-profiles", "data"),
+    Output("float-data", "data"),
+    Output("main-map", "figure"),
     Output("db-status", "children"),
+    Output("kpis", "children"),
     Input("date-filter", "value"),
+    State("selected-wmo", "data"),
+    State("selected-profile", "data"),
 )
-def load_data(date_filter):
+def load_data(date_filter, selected_wmo=None, selected_profile=None):
     # Relative to the dataset's latest measurement so historical samples remain useful.
     if date_filter not in ("all", "30", "90", "180", "365"):
         date_filter = "all"
@@ -594,64 +485,48 @@ def load_data(date_filter):
         date_clause = "AND date_utc >= (SELECT MAX(date_utc) FROM profiles) - (%s * INTERVAL '1 day')"
         params.append(int(date_filter))
     try:
-        profiles = db_query(f"""SELECT profile_id, wmo_id, latitude, longitude, date_utc,
-            temp_max, psal_max, has_doxy, has_chla, n_levels
+        profiles = db_query(f"""SELECT profile_id, wmo_id, latitude, longitude, date_utc, temp_max
             FROM profile_summary WHERE latitude BETWEEN -90 AND 90
             AND longitude BETWEEN -180 AND 180 {date_clause}
-            ORDER BY date_utc DESC NULLS LAST, profile_id DESC LIMIT 2000""", params)
+            ORDER BY date_utc DESC NULLS LAST, profile_id DESC LIMIT {MAP_PROFILE_LIMIT}""", params)
         floats = get_float_list()
+        trajectory = get_trajectory(selected_wmo) if selected_wmo else []
+        selected = get_profile_meta(selected_profile) if selected_profile else None
     except Exception as exc:
         log.warning("Data unavailable (%s)", type(exc).__name__)
-        return html.Div("Database unavailable. Check configuration and schema."), [], "DATABASE UNAVAILABLE"
+        return [], build_map([]), "DATABASE UNAVAILABLE", [kpi("—", "database unavailable")]
 
-    float_items = []
-    for f in floats[:15]:
-        float_items.append(
-            html.Div([
-                html.Div([
-                    html.Span(f["wmo_id"], style={"color": ACCENT_CYAN, "fontWeight": "700"}),
-                    html.Span(f" · {f['dac'] or '—'}", style={"color": TEXT_MUTED}),
-                ]),
-                html.Span(f"{f['n_profiles']} profiles",
-                          style={"color": TEXT_MUTED, "fontSize": "10px"}),
-            ],
-            id={"type": "float-item", "index": f["wmo_id"]},
-            style={**STYLES["float_item"],
-                   "background": "rgba(0,212,255,0.05)",
-                   "border": f"1px solid {OCEAN_BORDER}"},
-            n_clicks=0,
-        ))
-
-    n_floats = len(set(p["wmo_id"] for p in profiles))
-    status = f"{len(profiles)} mapped profiles · {n_floats} floats (up to 2,000)" if profiles else "No profiles in this date range"
-    return float_items, profiles, status
+    float_data = [{"wmo_id": f["wmo_id"], "dac": f["dac"], "n_profiles": f["n_profiles"],
+                   "first": fmt_date(f["first_date"]) if f["first_date"] else None,
+                   "last": fmt_date(f["last_date"]) if f["last_date"] else None} for f in floats]
+    if profiles:
+        status = f"{len(profiles):,} profiles"
+        if len(profiles) == MAP_PROFILE_LIMIT:
+            status += " (latest shown)"
+    else:
+        status = "No profiles in this period"
+    latest = max((f["last"] for f in float_data if f["last"]), default=None)
+    kpis = [kpi(f"{len(float_data):,}", "floats"),
+            kpi(f"{sum(f['n_profiles'] for f in float_data):,}", "profiles"),
+            kpi(latest or "—", "latest data")]
+    return float_data, build_map(profiles, selected_wmo, trajectory, selected), status, kpis
 
 
 @app.callback(
-    Output("main-map", "figure"),
-    Output("map-stats", "children"),
-    Input("all-profiles", "data"),
+    Output("float-list", "children"),
+    Output("float-count", "children"),
+    Input("float-data", "data"),
+    Input("float-search", "value"),
     Input("selected-wmo", "data"),
 )
-def update_map(profiles, selected_wmo):
-    try:
-        fig = build_map(profiles or [], selected_wmo)
-    except Exception:
-        fig = build_map(profiles or [])
-    n   = len(profiles or [])
-    wmos = len(set(p["wmo_id"] for p in (profiles or [])))
-    stats = [
-        html.Span(f"{n} profiles", style=STYLES["stat_badge"]),
-        html.Span(f"{wmos} floats", style=STYLES["stat_badge"]),
-    ]
-    if selected_wmo:
-        stats.append(html.Span(f"WMO {selected_wmo}", style={
-            **STYLES["stat_badge"],
-            "background": f"rgba(0,180,160,0.15)",
-            "borderColor": f"{ACCENT_TEAL}66",
-            "color": ACCENT_TEAL,
-        }))
-    return fig, stats
+def render_float_list(floats, search, selected_wmo):
+    floats = floats or []
+    term = (search or "").strip().lower()
+    shown = [f for f in floats if term in f["wmo_id"] or term in (f["dac"] or "").lower()] if term else floats
+    if not floats:
+        return html.Div("No floats imported yet.", className="empty"), ""
+    caption = f"{len(shown)} of {len(floats)} floats" if term else f"{len(floats)} floats"
+    return [float_item(f, f["wmo_id"] == selected_wmo) for f in shown] or html.Div("No matching floats.", className="empty"), caption
 
 
 @app.callback(
@@ -681,44 +556,74 @@ def select_profile(click_data, float_clicks, chat_selection):
 
 
 @app.callback(
+    Output("main-map", "figure", allow_duplicate=True),
+    Input("selected-wmo", "data"),
+    Input("selected-profile", "data"),
+    prevent_initial_call=True,
+)
+def update_map_selection(wmo_id, profile_id):
+    """Patch only the selection traces instead of resending every profile."""
+    try:
+        traj = get_trajectory(wmo_id) if wmo_id else []
+        meta = get_profile_meta(profile_id) if profile_id else None
+    except Exception:
+        return no_update
+    patch = Patch()
+    patch["data"][1] = trajectory_trace(traj).to_plotly_json()
+    halo, dot = selection_traces(meta)
+    patch["data"][2] = halo.to_plotly_json()
+    patch["data"][3] = dot.to_plotly_json()
+    if "selected-wmo.data" in ctx.triggered_prop_ids and traj:
+        center, zoom = map_view([t["latitude"] for t in traj], [t["longitude"] for t in traj])
+        patch["layout"]["map"]["center"] = center
+        patch["layout"]["map"]["zoom"] = zoom
+    return patch
+
+
+@app.callback(
     Output("ts-profile-chart", "figure"),
     Output("bgc-chart",        "figure"),
     Output("ts-diagram",       "figure"),
     Output("profile-meta",     "children"),
     Output("profile-stats-row","children"),
+    Output("ts-title",         "children"),
     Input("selected-profile", "data"),
     Input("selected-wmo",     "data"),
 )
 def update_profile_charts(profile_id, wmo_id):
+    ts_title = f"T–S diagram · WMO {wmo_id}" if wmo_id else "T–S diagram · latest 5,000 levels"
     try:
         obs = get_profile_obs(profile_id) if profile_id else []
+        meta = get_profile_meta(profile_id) if profile_id else None
         ts_diag = build_ts_diagram(wmo_id)
     except Exception:
-        blank = go.Figure().update_layout(**PLOTLY_THEME, title="Database unavailable")
-        return blank, blank, blank, "Database unavailable", []
-    ts_fig  = build_profile_chart(profile_id, obs) if profile_id else go.Figure().update_layout(
-        **PLOTLY_THEME, height=320,
-        title=dict(text="Click a profile on the map", font=dict(color=TEXT_MUTED, size=12)))
-    bgc_fig = build_bgc_chart(profile_id, obs) if profile_id else go.Figure().update_layout(
-        **PLOTLY_THEME, height=260,
-        title=dict(text="BGC parameters — select a profile", font=dict(color=TEXT_MUTED, size=12)))
+        blank = placeholder_figure("Database unavailable", height=140)
+        return blank, blank, blank, "Database unavailable", [], ts_title
+    if not profile_id:
+        hint = placeholder_figure("Select a profile on the map or in the float list", height=140)
+        return hint, placeholder_figure("Oxygen, chlorophyll and nitrate appear here", height=120), ts_diag, \
+            html.Span("No profile selected", className="muted"), [], ts_title
 
-    meta = f"WMO {wmo_id} · Profile #{profile_id} · up to 5,000 levels" if profile_id else "Select a profile on the map"
-
-    stats_row = []
-    if profile_id:
-        if obs:
-            temps = [o["temp"] for o in obs if o["temp"] is not None]
-            psals = [o["psal"] for o in obs if o["psal"] is not None]
-            pres  = [o["pres"] for o in obs if o["pres"]  is not None]
-            if temps:
-                stats_row.append(stat_pill("MAX TEMP", f"{max(temps):.1f}°C", ACCENT_WARM))
-            if psals:
-                stats_row.append(stat_pill("AVG SAL", f"{sum(psals)/len(psals):.2f}", ACCENT_CYAN))
-            if pres:
-                stats_row.append(stat_pill("MAX PRESSURE", f"{max(pres):.0f} dbar", ACCENT_TEAL))
-
-    return ts_fig, bgc_fig, ts_diag, meta, stats_row
+    details = [html.Span(f"WMO {wmo_id}", className="badge")]
+    if meta:
+        details += [html.Span(f"Cycle {meta['cycle_number']}{'D' if meta.get('direction') == 'D' else ''}"),
+                    html.Span(fmt_date(meta["date_utc"])),
+                    html.Span(fmt_position(meta["latitude"], meta["longitude"]))]
+        if meta.get("data_mode") in DATA_MODES:
+            details.append(html.Span(DATA_MODES[meta["data_mode"]]))
+    stats = []
+    temps = [o["temp"] for o in obs if o.get("temp") is not None]
+    psals = [o["psal"] for o in obs if o.get("psal") is not None]
+    pres = [o["pres"] for o in obs if o.get("pres") is not None]
+    if temps:
+        stats.append(stat_tile("Max temperature", f"{max(temps):.1f} °C"))
+    if psals:
+        stats.append(stat_tile("Mean salinity", f"{sum(psals) / len(psals):.2f} PSU"))
+    if pres:
+        stats.append(stat_tile("Deepest level", f"{max(pres):,.0f} dbar"))
+    stats.append(stat_tile("Levels", f"{len(obs):,}"))
+    return (build_profile_chart(profile_id, obs), build_bgc_chart(profile_id, obs), ts_diag,
+            details, stats, ts_title)
 
 
 @app.callback(
@@ -732,30 +637,82 @@ def update_profile_charts(profile_id, wmo_id):
     State("chat-input",    "value"),
     State("chat-messages", "children"),
     State("chat-history",  "data"),
+    State("api-key-store", "data"),
+    State("model-select", "value"),
     prevent_initial_call=True,
     running=[(Output("send-btn", "disabled"), True, False), (Output("chat-input", "disabled"), True, False)],
 )
-def handle_chat(n_clicks, n_submit, query, messages, history):
+def handle_chat(n_clicks, n_submit, query, messages, history, api_key=None, model=None):
     if not query or not query.strip():
         return no_update, no_update, no_update, no_update, no_update
-
-    messages = (messages or [])[-12:]
+    messages = (messages or [])[-12:] + [chat_bubble(query, role="user")]
     history = (history or [])[-6:]
-
-    # Add user bubble
-    messages = messages + [chat_bubble(query, role="user")]
-
-    response, selection = answer_question(query, history, request.remote_addr or "unknown")
-
-    messages = messages + [chat_bubble(response, role="assistant")]
-
-    # Update LangChain history (simple pairs)
-    history = history + [
-        {"role": "human", "content": query},
-        {"role": "assistant", "content": response},
-    ]
-
+    # The visitor's key (if any) is used for this request only; it is never logged or stored.
+    response, selection = answer_question(query, history, request.remote_addr or "unknown",
+                                          api_key=api_key, model=model)
+    messages = messages + [chat_bubble(response)]
+    history = history + [{"role": "human", "content": query}, {"role": "assistant", "content": response}]
     return messages[-12:], history[-6:], "", "", selection or no_update
+
+
+@app.callback(
+    Output("chat-input", "value", allow_duplicate=True),
+    Input({"type": "suggestion", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def use_suggestion(clicks):
+    trigger = ctx.triggered_id
+    if isinstance(trigger, dict) and any(clicks or []):
+        return SUGGESTIONS[trigger["index"]]
+    return no_update
+
+
+# Tabs switch in the browser; no server round trip.
+clientside_callback(
+    """
+    function(floatsClicks, chatClicks) {
+        const chat = (dash_clientside.callback_context.triggered[0] || {}).prop_id === "tab-chat.n_clicks";
+        return [chat ? "tab" : "tab is-active", chat ? "tab is-active" : "tab",
+                chat ? "pane is-hidden" : "pane", chat ? "pane" : "pane is-hidden"];
+    }
+    """,
+    Output("tab-floats", "className"), Output("tab-chat", "className"),
+    Output("pane-floats", "className"), Output("pane-chat", "className"),
+    Input("tab-floats", "n_clicks"), Input("tab-chat", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+# The key is saved to sessionStorage in the browser, never through the server.
+clientside_callback(
+    """
+    function(saveClicks, clearClicks, value) {
+        const trigger = (dash_clientside.callback_context.triggered[0] || {}).prop_id || "";
+        const skip = dash_clientside.no_update;
+        if (trigger.startsWith("clear-key-btn")) { return [null, "", "Key removed from this tab."]; }
+        if (!trigger.startsWith("save-key-btn")) { return [skip, skip, skip]; }
+        const key = (value || "").trim();
+        if (!/^sk-or-[A-Za-z0-9_-]{16,200}$/.test(key)) {
+            return [skip, skip, "That doesn't look like an OpenRouter key. Keys start with sk-or-."];
+        }
+        return [key, "", "Key saved for this tab."];
+    }
+    """,
+    Output("api-key-store", "data"), Output("api-key-input", "value"), Output("key-feedback", "children"),
+    Input("save-key-btn", "n_clicks"), Input("clear-key-btn", "n_clicks"),
+    State("api-key-input", "value"),
+    prevent_initial_call=True,
+)
+clientside_callback(
+    """
+    function(key, server) {
+        if (key) { return ["Your key …" + key.slice(-4), "ai-status is-on"]; }
+        if (server && server.enabled) { return ["Server model on", "ai-status is-on"]; }
+        return ["Off", "ai-status"];
+    }
+    """,
+    Output("ai-status", "children"), Output("ai-status", "className"),
+    Input("api-key-store", "data"), State("server-ai", "data"),
+)
 
 
 if __name__ == "__main__":
