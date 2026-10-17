@@ -75,24 +75,28 @@ def fmt_position(lat, lon):
 
 
 # ── Design tokens (mirrored in assets/style.css) ───────────
-FONT = "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
-SURFACE_2 = "#182235"
-BORDER = "#243149"
-GRID = "#1d283b"
-INK = "#e8edf5"
-INK_2 = "#aab4c3"
-MUTED = "#7d8899"
-ACCENT = "#3987e5"
-PROFILE_DOT = "#8ea2bf"
-# Validated with the dataviz palette checks against the #111827 panel surface.
+FONT = "Geist, system-ui, -apple-system, 'Segoe UI', sans-serif"
+MONO = "'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace"
+SURFACE_2 = "#232327"
+BORDER = "#2e2e33"
+GRID = "#26262b"
+INK = "#f4f4f5"
+INK_2 = "#a1a1aa"
+MUTED = "#8b8b94"
+ACCENT = "#34d399"          # the one UI accent (emerald)
+PROFILE_DOT = "#a1a1aa"
+# Data series, validated with the dataviz palette checks against the #18181b panel surface.
 COLORS = {"temp": "#d95926", "psal": "#3987e5", "doxy": "#3987e5",
-          "chla": "#199e70", "nitrate": "#9085e9", "bbp700": "#d55181"}
+          "chla": "#199e70", "nitrate": "#c98500", "bbp700": "#d55181"}
 PRESSURE_SCALE = [[0, "#b7d3f6"], [0.5, "#5598e7"], [1, "#1c5cab"]]  # one hue, shallow → deep
 BGC_VARIABLES = [("doxy", "Oxygen (µmol/kg)"), ("chla", "Chlorophyll-a (mg/m³)"),
                  ("nitrate", "Nitrate (µmol/kg)"), ("bbp700", "Backscatter 700 nm (m⁻¹)")]
+# On wide screens the map sits under a 340 px left panel and a 420 px right panel;
+# shifting the centre by half the difference frames data in the visible gap.
+PANEL_OFFSET_PX = 40
 
 AXIS = dict(gridcolor=GRID, linecolor=BORDER, zeroline=False,
-            tickfont=dict(color=MUTED, size=11), title=dict(font=dict(color=INK_2, size=12)))
+            tickfont=dict(family=MONO, color=MUTED, size=10), title=dict(font=dict(color=INK_2, size=12)))
 BASE_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     font=dict(family=FONT, color=INK_2, size=12),
@@ -125,10 +129,11 @@ def map_view(lats, lons):
     if not lats:
         return dict(lat=5, lon=75), 2.2
     lat0, lat1, lon0, lon1 = min(lats), max(lats), min(lons), max(lons)
-    # A 512 px world at zoom 0; leave margin for a ~640 px wide map.
+    # A 512 px world at zoom 0; leave margin for a ~620 px wide visible gap.
     span = max(lon1 - lon0, (lat1 - lat0) * 1.4, 2.0)
     zoom = max(0.8, min(7.5, math.log2(380 / span)))
-    return dict(lat=(lat0 + lat1) / 2, lon=(lon0 + lon1) / 2), zoom
+    lon_shift = PANEL_OFFSET_PX * 360 / (512 * 2 ** zoom)
+    return dict(lat=(lat0 + lat1) / 2, lon=(lon0 + lon1) / 2 + lon_shift), zoom
 
 
 def trajectory_trace(traj):
@@ -263,10 +268,11 @@ def build_ts_diagram(wmo_id=None):
 # ── App ─────────────────────────────────────────────────────
 app = Dash(
     __name__,
-    external_stylesheets=["https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"],
+    external_stylesheets=["https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap"],
     title="FloatChat · Argo ocean explorer",
     update_title=None,
-    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
+    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"},
+               {"name": "theme-color", "content": "#09090b"}],
 )
 server = app.server
 server.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
@@ -301,6 +307,11 @@ def security_headers(response):
 SUGGESTIONS = ["Summarise the dataset", "List floats from INCOIS", "Profiles near 12°N 72°E"]
 
 
+def icon(name, extra=""):
+    """A stroke icon drawn by CSS masks (assets/style.css); decorative only."""
+    return html.Span(className=f"icon icon-{name} {extra}".strip(), **{"aria-hidden": "true"})
+
+
 def chat_bubble(text, role="assistant"):
     if role == "user":
         return html.Div(text, className="msg msg-user")
@@ -317,13 +328,35 @@ def kpi(value, label):
                     className="kpi")
 
 
-def float_item(f, selected):
+def skeleton_kpis():
+    return [html.Div(className="kpi skeleton", style={"width": f"{w}px"}) for w in (88, 112, 150)]
+
+
+def skeleton_rows(count=6):
+    return [html.Div([html.Div(className="skeleton line-lg"), html.Div(className="skeleton line-sm")],
+                     className="skeleton-row") for _ in range(count)]
+
+
+def status_chip(text, state):
+    return [html.Span(className=f"status-dot is-{state}"), html.Span(text)]
+
+
+def notice(icon_name, title, body, tone=""):
+    """Composed empty and error states: left aligned, with a next step."""
+    return html.Div([
+        html.Div(icon(icon_name), className="notice-icon"),
+        html.Div(title, className="notice-title"),
+        html.P(body, className="notice-body"),
+    ], className=f"notice {tone}".strip())
+
+
+def float_item(f, selected, index=0):
     span = f"{f['first'][:4]}–{f['last'][:4]}" if f.get("first") and f.get("last") else "No profiles"
     return html.Button([
         html.Span(f["wmo_id"], className="float-wmo"),
-        html.Span(f"{f['dac'] or '—'} · {f['n_profiles']:,} profiles", className="float-meta"),
         html.Span(span, className="float-span"),
-    ], id={"type": "float-item", "index": f["wmo_id"]}, n_clicks=0,
+        html.Span(f"{f['dac'] or '—'} · {f['n_profiles']:,} profiles", className="float-meta"),
+    ], id={"type": "float-item", "index": f["wmo_id"]}, n_clicks=0, style={"--i": index},
         className="float-item is-selected" if selected else "float-item")
 
 
@@ -345,21 +378,26 @@ def ai_settings():
     useful = own_keys or os.getenv("AI_PROVIDER", "").lower() == "openrouter"
     models = openrouter_models()
     return html.Details([
-        html.Summary([html.Span("AI settings"), html.Span(id="ai-status", className="ai-status")]),
+        html.Summary([icon("chevron", "chevron"), html.Span("AI settings"),
+                      html.Span([html.Span(className="status-dot"), html.Span(id="ai-status")],
+                                id="ai-status-chip", className="ai-status")]),
         html.Div([
             html.Div([
                 html.Label("OpenRouter API key", htmlFor="api-key-input", className="field-label"),
                 html.Div([
-                    dcc.Input(id="api-key-input", type="password", placeholder="sk-or-…",
-                              autoComplete="off", className="text-input", debounce=False),
+                    html.Div([icon("key"), dcc.Input(id="api-key-input", type="password", placeholder="sk-or-v1-...",
+                                                     autoComplete="off", className="text-input with-icon",
+                                                     debounce=False)], className="input-wrap"),
                     html.Button("Save", id="save-key-btn", n_clicks=0, className="btn btn-primary"),
                     html.Button("Remove", id="clear-key-btn", n_clicks=0, className="btn btn-ghost"),
                 ], className="key-row"),
                 html.Div(id="key-feedback", className="field-help", role="status"),
-            ], hidden=not own_keys),
-            html.Label("Model", htmlFor="model-select", className="field-label"),
-            dcc.Dropdown(id="model-select", options=[{"label": label, "value": value} for value, label in models.items()],
-                         value=next(iter(models)), clearable=False, searchable=False, className="dd"),
+            ], className="field", hidden=not own_keys),
+            html.Div([
+                html.Label("Model", htmlFor="model-select", className="field-label"),
+                dcc.Dropdown(id="model-select", options=[{"label": label, "value": value} for value, label in models.items()],
+                             value=next(iter(models)), clearable=False, searchable=False, className="dd"),
+            ], className="field"),
             html.P(["Your key stays in this browser tab and is sent only with your questions, over HTTPS. "
                     "The server never stores it. Usage is billed to your OpenRouter account. ",
                     html.A("Get a key", href="https://openrouter.ai/keys", target="_blank", rel="noopener")],
@@ -369,99 +407,125 @@ def ai_settings():
 
 
 # ── Layout ──────────────────────────────────────────────────
+# The map is a full-screen canvas; panels float over it on wide screens and
+# stack below it on narrow ones (see assets/style.css).
 app.layout = html.Div([
     dcc.Store(id="chat-history", data=[]),
     dcc.Store(id="selected-profile", data=None),
     dcc.Store(id="selected-wmo", data=None),
-    dcc.Store(id="float-data", data=[]),
+    dcc.Store(id="float-data", data=None),   # None while loading, {"error": ...} on failure
     dcc.Store(id="chat-selection", data=None),
     dcc.Store(id="api-key-store", storage_type="session"),
     dcc.Store(id="server-ai", data={"enabled": ai_enabled()}),
+    dcc.Store(id="scroll-sink"),
+    dcc.Store(id="view-sink"),
 
-    html.Header([
+    html.Div(dcc.Graph(id="main-map", className="map-graph", figure=build_map([]),
+                       config={"scrollZoom": True, "displayModeBar": False, "responsive": True}),
+             className="map-stage"),
+
+    html.Div([
+        # Left column: brand, floats and assistant
         html.Div([
-            html.Div("F", className="brand-mark", **{"aria-hidden": "true"}),
-            html.Div([html.Div("FloatChat", className="brand-name"),
-                      html.Div("Argo ocean explorer", className="brand-sub")]),
-        ], className="brand"),
-        html.Div(id="kpis", className="kpis"),
-        html.Div([
-            html.Label("Period", htmlFor="date-filter"),
-            dcc.Dropdown(
-                id="date-filter",
-                options=[
-                    {"label": "All time", "value": "all"},
-                    {"label": "Last 30 days of data", "value": "30"},
-                    {"label": "Last 90 days of data", "value": "90"},
-                    {"label": "Last 180 days of data", "value": "180"},
-                    {"label": "Last year of data", "value": "365"},
-                ],
-                value="all", clearable=False, searchable=False, className="dd",
-            ),
-        ], className="period"),
-    ], className="topbar"),
-
-    html.Main([
-        # Left: floats and assistant
-        html.Aside([
             html.Div([
-                html.Button("Floats", id="tab-floats", n_clicks=0, className="tab is-active", role="tab"),
-                html.Button("Ask AI", id="tab-chat", n_clicks=0, className="tab", role="tab"),
-            ], className="tabs", role="tablist"),
+                html.Div(icon("float"), className="brand-mark"),
+                html.Div([html.Div("FloatChat", className="brand-name"),
+                          html.Div("Argo ocean explorer", className="brand-sub")]),
+            ], className="brand glass reveal", style={"--d": 0}),
 
-            html.Div([
-                dcc.Input(id="float-search", type="search", placeholder="Search WMO or data centre",
-                          debounce=False, className="text-input search"),
-                html.Div(id="float-count", className="list-caption"),
-                html.Div(id="float-list", className="float-list"),
-            ], id="pane-floats", className="pane"),
-
-            html.Div([
-                ai_settings(),
-                html.Div([chat_bubble(welcome_message())], id="chat-messages", className="messages",
-                         **{"aria-live": "polite"}),
-                html.Div([html.Button(text, id={"type": "suggestion", "index": i}, n_clicks=0, className="chip")
-                          for i, text in enumerate(SUGGESTIONS)], className="chips"),
-                dcc.Loading(html.Div(id="agent-loading"), type="dot", color=ACCENT, className="chat-loading"),
+            html.Aside([
                 html.Div([
-                    dcc.Input(id="chat-input", type="text", placeholder="Ask about the ocean data…",
-                              debounce=False, n_submit=0, maxLength=MAX_QUERY_CHARS, className="text-input"),
-                    html.Button("Send", id="send-btn", n_clicks=0, className="btn btn-primary"),
-                ], className="composer"),
-            ], id="pane-chat", className="pane is-hidden"),
-        ], className="panel sidebar"),
+                    html.Button([icon("list"), "Floats"], id="tab-floats", n_clicks=0,
+                                className="tab is-active", role="tab"),
+                    html.Button([icon("sparkle"), "Ask AI"], id="tab-chat", n_clicks=0, className="tab", role="tab"),
+                ], id="tabs", className="tabs", role="tablist"),
 
-        # Centre: map
-        html.Section([
+                html.Div([
+                    html.Div([icon("search"), dcc.Input(id="float-search", type="search",
+                                                        placeholder="Search WMO or data centre", debounce=False,
+                                                        className="text-input with-icon")], className="input-wrap"),
+                    html.Div(id="float-count", className="list-caption"),
+                    html.Div(skeleton_rows(), id="float-list", className="float-list"),
+                ], id="pane-floats", className="pane"),
+
+                html.Div([
+                    ai_settings(),
+                    html.Div([chat_bubble(welcome_message())], id="chat-messages", className="messages",
+                             **{"aria-live": "polite"}),
+                    html.Div([html.Button(text, id={"type": "suggestion", "index": i}, n_clicks=0, className="chip")
+                              for i, text in enumerate(SUGGESTIONS)], className="chips"),
+                    dcc.Loading(html.Div(id="agent-loading"), delay_show=100, parent_className="chat-loading",
+                                custom_spinner=html.Div([html.Span(), html.Span(), html.Span()], className="typing",
+                                                        title="Thinking")),
+                    html.Div([
+                        dcc.Input(id="chat-input", type="text", placeholder="Ask about the ocean data",
+                                  debounce=False, n_submit=0, maxLength=MAX_QUERY_CHARS, className="text-input"),
+                        html.Button(icon("send"), id="send-btn", n_clicks=0, className="btn btn-primary btn-icon",
+                                    title="Send", **{"aria-label": "Send"}),
+                    ], className="composer"),
+                ], id="pane-chat", className="pane is-hidden"),
+            ], className="panel sidebar glass reveal", style={"--d": 80}),
+        ], className="col-left"),
+
+        # Centre column: toolbar and status float over the map
+        html.Div([
             html.Div([
-                html.H2("Profile locations", className="panel-title"),
-                html.Div(id="db-status", className="panel-sub"),
+                html.Div(skeleton_kpis(), id="kpis", className="kpis"),
+                html.Div(className="toolbar-rule"),
+                html.Div([
+                    html.Label("Period", htmlFor="date-filter"),
+                    dcc.Dropdown(
+                        id="date-filter",
+                        options=[
+                            {"label": "All time", "value": "all"},
+                            {"label": "Last 30 days of data", "value": "30"},
+                            {"label": "Last 90 days of data", "value": "90"},
+                            {"label": "Last 180 days of data", "value": "180"},
+                            {"label": "Last year of data", "value": "365"},
+                        ],
+                        value="all", clearable=False, searchable=False, className="dd",
+                    ),
+                ], className="period"),
+            ], className="toolbar glass reveal", style={"--d": 160}),
+            html.Div([
+                html.Div(status_chip("Connecting", "idle"), id="db-status", className="status"),
                 html.Div("Click a dot to inspect a profile", className="hint"),
-            ], className="panel-head"),
-            dcc.Graph(id="main-map", className="map-graph", figure=build_map([]),
-                      config={"scrollZoom": True, "displayModeBar": False, "responsive": True}),
-        ], className="panel map-panel"),
+            ], className="statusbar glass reveal", style={"--d": 240}),
+        ], className="col-center"),
 
-        # Right: inspector
-        html.Aside([
-            html.Div([
-                html.H2("Profile inspector", className="panel-title"),
-                html.Div(id="profile-meta", className="profile-meta"),
-            ], className="panel-head stacked"),
-            html.Div([
-                html.Div(id="profile-stats-row", className="stats"),
-                html.Section([html.H3("Temperature and salinity", className="chart-title"),
-                              dcc.Graph(id="ts-profile-chart", config={"displayModeBar": False})],
-                             className="chart-block"),
-                html.Section([html.H3("Biogeochemistry", className="chart-title"),
-                              dcc.Graph(id="bgc-chart", config={"displayModeBar": False})],
-                             className="chart-block"),
-                html.Section([html.H3(id="ts-title", className="chart-title"),
-                              dcc.Graph(id="ts-diagram", config={"displayModeBar": False})],
-                             className="chart-block"),
-            ], className="inspector-body"),
-        ], className="panel inspector"),
-    ], className="layout"),
+        # Right column: inspector
+        html.Div([
+            html.Aside([
+                html.Div([
+                    html.H2("Profile inspector", className="panel-title"),
+                    html.Div(id="profile-meta", className="profile-meta"),
+                ], className="panel-head"),
+                dcc.Loading(
+                    html.Div([
+                        html.Div(notice("pin", "Pick a profile",
+                                        "Click any dot on the map, or choose a float from the list. Its temperature, "
+                                        "salinity and biogeochemistry profiles appear here."),
+                                 id="inspector-empty"),
+                        html.Div([
+                            html.Div(id="profile-stats-row", className="stats"),
+                            html.Section([html.H3("Temperature and salinity", className="chart-title"),
+                                          dcc.Graph(id="ts-profile-chart", config={"displayModeBar": False})],
+                                         className="chart-block"),
+                            html.Section([html.H3("Biogeochemistry", className="chart-title"),
+                                          dcc.Graph(id="bgc-chart", config={"displayModeBar": False})],
+                                         className="chart-block"),
+                        ], id="inspector-detail", className="inspector-detail", hidden=True),
+                        html.Section([html.H3(id="ts-title", className="chart-title"),
+                                      dcc.Graph(id="ts-diagram", config={"displayModeBar": False})],
+                                     className="chart-block"),
+                    ], className="inspector-body"),
+                    # Keep the previous render visible and dimmed while refreshing; no layout jump.
+                    overlay_style={"visibility": "visible", "opacity": 0.45}, delay_show=150,
+                    parent_className="inspector-loading", custom_spinner=html.Div(className="progress-line"),
+                ),
+            ], className="panel inspector glass reveal", style={"--d": 120}),
+        ], className="col-right"),
+    ], className="shell"),
 ], className="app")
 
 
@@ -494,13 +558,14 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None):
         selected = get_profile_meta(selected_profile) if selected_profile else None
     except Exception as exc:
         log.warning("Data unavailable (%s)", type(exc).__name__)
-        return [], build_map([]), "DATABASE UNAVAILABLE", [kpi("—", "database unavailable")]
+        return ({"error": "database"}, build_map([]), status_chip("Database unavailable", "error"),
+                [kpi("—", "floats"), kpi("—", "profiles")])
 
     float_data = [{"wmo_id": f["wmo_id"], "dac": f["dac"], "n_profiles": f["n_profiles"],
                    "first": fmt_date(f["first_date"]) if f["first_date"] else None,
                    "last": fmt_date(f["last_date"]) if f["last_date"] else None} for f in floats]
     if profiles:
-        status = f"{len(profiles):,} profiles"
+        status = f"{len(profiles):,} profiles on the map"
         if len(profiles) == MAP_PROFILE_LIMIT:
             status += " (latest shown)"
     else:
@@ -508,8 +573,8 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None):
     latest = max((f["last"] for f in float_data if f["last"]), default=None)
     kpis = [kpi(f"{len(float_data):,}", "floats"),
             kpi(f"{sum(f['n_profiles'] for f in float_data):,}", "profiles"),
-            kpi(latest or "—", "latest data")]
-    return float_data, build_map(profiles, selected_wmo, trajectory, selected), status, kpis
+            kpi(latest or "—", "latest")]
+    return float_data, build_map(profiles, selected_wmo, trajectory, selected), status_chip(status, "live"), kpis
 
 
 @app.callback(
@@ -517,16 +582,24 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None):
     Output("float-count", "children"),
     Input("float-data", "data"),
     Input("float-search", "value"),
-    Input("selected-wmo", "data"),
+    State("selected-wmo", "data"),
 )
 def render_float_list(floats, search, selected_wmo):
-    floats = floats or []
+    if floats is None:
+        return skeleton_rows(), ""
+    if isinstance(floats, dict):
+        return notice("alert", "Database unavailable",
+                      "The float list and map load once the database is reachable. Try again in a minute.",
+                      "is-error"), ""
+    if not floats:
+        return notice("list", "No floats yet",
+                      "Import Argo NetCDF files with the ETL (docker compose run --rm etl) and they appear here."), ""
     term = (search or "").strip().lower()
     shown = [f for f in floats if term in f["wmo_id"] or term in (f["dac"] or "").lower()] if term else floats
-    if not floats:
-        return html.Div("No floats imported yet.", className="empty"), ""
     caption = f"{len(shown)} of {len(floats)} floats" if term else f"{len(floats)} floats"
-    return [float_item(f, f["wmo_id"] == selected_wmo) for f in shown] or html.Div("No matching floats.", className="empty"), caption
+    if not shown:
+        return notice("search", "No matching floats", "Try part of a WMO number, or a data centre code such as IN or AO."), caption
+    return [float_item(f, f["wmo_id"] == selected_wmo, i) for i, f in enumerate(shown)], caption
 
 
 @app.callback(
@@ -587,6 +660,8 @@ def update_map_selection(wmo_id, profile_id):
     Output("profile-meta",     "children"),
     Output("profile-stats-row","children"),
     Output("ts-title",         "children"),
+    Output("inspector-empty",  "hidden"),
+    Output("inspector-detail", "hidden"),
     Input("selected-profile", "data"),
     Input("selected-wmo",     "data"),
 )
@@ -598,17 +673,17 @@ def update_profile_charts(profile_id, wmo_id):
         ts_diag = build_ts_diagram(wmo_id)
     except Exception:
         blank = placeholder_figure("Database unavailable", height=140)
-        return blank, blank, blank, "Database unavailable", [], ts_title
+        error = html.Span([icon("alert"), "Database unavailable"], className="meta-error")
+        return blank, blank, blank, error, [], ts_title, False, True
     if not profile_id:
-        hint = placeholder_figure("Select a profile on the map or in the float list", height=140)
-        return hint, placeholder_figure("Oxygen, chlorophyll and nitrate appear here", height=120), ts_diag, \
-            html.Span("No profile selected", className="muted"), [], ts_title
+        blank = placeholder_figure("", height=60)
+        return blank, blank, ts_diag, html.Span("No profile selected", className="muted"), [], ts_title, False, True
 
     details = [html.Span(f"WMO {wmo_id}", className="badge")]
     if meta:
         details += [html.Span(f"Cycle {meta['cycle_number']}{'D' if meta.get('direction') == 'D' else ''}"),
-                    html.Span(fmt_date(meta["date_utc"])),
-                    html.Span(fmt_position(meta["latitude"], meta["longitude"]))]
+                    html.Span(fmt_date(meta["date_utc"]), className="mono"),
+                    html.Span(fmt_position(meta["latitude"], meta["longitude"]), className="mono")]
         if meta.get("data_mode") in DATA_MODES:
             details.append(html.Span(DATA_MODES[meta["data_mode"]]))
     stats = []
@@ -623,7 +698,7 @@ def update_profile_charts(profile_id, wmo_id):
         stats.append(stat_tile("Deepest level", f"{max(pres):,.0f} dbar"))
     stats.append(stat_tile("Levels", f"{len(obs):,}"))
     return (build_profile_chart(profile_id, obs), build_bgc_chart(profile_id, obs), ts_diag,
-            details, stats, ts_title)
+            details, stats, ts_title, True, False)
 
 
 @app.callback(
@@ -667,18 +742,76 @@ def use_suggestion(clicks):
     return no_update
 
 
-# Tabs switch in the browser; no server round trip.
+# Tabs switch in the browser; no server round trip. The tablist class moves the sliding indicator.
 clientside_callback(
     """
     function(floatsClicks, chatClicks) {
         const chat = (dash_clientside.callback_context.triggered[0] || {}).prop_id === "tab-chat.n_clicks";
-        return [chat ? "tab" : "tab is-active", chat ? "tab is-active" : "tab",
+        return [chat ? "tabs is-chat" : "tabs",
+                chat ? "tab" : "tab is-active", chat ? "tab is-active" : "tab",
                 chat ? "pane is-hidden" : "pane", chat ? "pane" : "pane is-hidden"];
     }
     """,
+    Output("tabs", "className"),
     Output("tab-floats", "className"), Output("tab-chat", "className"),
     Output("pane-floats", "className"), Output("pane-chat", "className"),
     Input("tab-floats", "n_clicks"), Input("tab-chat", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+# map_view() frames data for the ~620 px gap between the desktop panels. Correct the zoom
+# (and drop the panel offset when panels stack) for the real map width, once per new view
+# from the server, so later manual panning is left alone.
+clientside_callback(
+    """
+    function(fig) {
+        const m = fig && fig.layout && fig.layout.map;
+        if (!m || !m.center) { return dash_clientside.no_update; }
+        const key = JSON.stringify([m.center, m.zoom]);
+        if (window.__floatchatView === key) { return dash_clientside.no_update; }
+        window.__floatchatView = key;
+        setTimeout(() => {
+            const gd = document.querySelector("#main-map .js-plotly-plot");
+            if (!gd || !window.Plotly) { return; }
+            const wide = window.matchMedia("(min-width: 1280px)").matches;
+            const visible = wide ? gd.clientWidth - (340 + 420 + 16 * 4) : gd.clientWidth;
+            const zoom = Math.max(0.5, m.zoom + Math.log2(Math.max(visible, 200) / 620));
+            const lon = wide ? m.center.lon : m.center.lon - 40 * 360 / (512 * Math.pow(2, m.zoom));
+            window.Plotly.relayout(gd, {"map.zoom": zoom, "map.center": {lat: m.center.lat, lon: lon}});
+        }, 250);
+        return dash_clientside.no_update;
+    }
+    """,
+    Output("view-sink", "data"),
+    Input("main-map", "figure"),
+)
+
+# Keep the newest chat message in view.
+clientside_callback(
+    """
+    function(children) {
+        setTimeout(() => {
+            const el = document.getElementById("chat-messages");
+            if (el) { el.scrollTo({top: el.scrollHeight, behavior: "smooth"}); }
+        }, 60);
+        return dash_clientside.no_update;
+    }
+    """,
+    Output("scroll-sink", "data"),
+    Input("chat-messages", "children"),
+    prevent_initial_call=True,
+)
+
+# Highlight the selected float without re-rendering (and re-animating) the list.
+clientside_callback(
+    """
+    function(wmo, ids) {
+        return (ids || []).map(id => id.index === wmo ? "float-item is-selected" : "float-item");
+    }
+    """,
+    Output({"type": "float-item", "index": ALL}, "className"),
+    Input("selected-wmo", "data"),
+    State({"type": "float-item", "index": ALL}, "id"),
     prevent_initial_call=True,
 )
 
@@ -705,12 +838,12 @@ clientside_callback(
 clientside_callback(
     """
     function(key, server) {
-        if (key) { return ["Your key …" + key.slice(-4), "ai-status is-on"]; }
+        if (key) { return ["Your key ending " + key.slice(-4), "ai-status is-on"]; }
         if (server && server.enabled) { return ["Server model on", "ai-status is-on"]; }
         return ["Off", "ai-status"];
     }
     """,
-    Output("ai-status", "children"), Output("ai-status", "className"),
+    Output("ai-status", "children"), Output("ai-status-chip", "className"),
     Input("api-key-store", "data"), State("server-ai", "data"),
 )
 

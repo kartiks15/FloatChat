@@ -13,7 +13,11 @@ class DashboardTests(unittest.TestCase):
             response = client.get('/readyz')
             self.assertEqual(response.status_code, 503)
             self.assertNotIn(b'credential', response.data)
-            self.assertEqual(app.load_data('30')[2], 'DATABASE UNAVAILABLE')
+            floats, _, status, _ = app.load_data('30')
+            self.assertEqual(floats, {'error': 'database'})
+            self.assertIn('Database unavailable', str(status))
+            self.assertIn('is-error', str(status))
+            self.assertIn('Database unavailable', str(app.render_float_list(floats, '', None)[0]))
 
     def test_date_filter_is_parameterized_and_has_one_outer_where(self):
         with patch('app.db_query', return_value=[]) as fetch:
@@ -58,8 +62,16 @@ class DashboardTests(unittest.TestCase):
                     for i, (lat, lon) in enumerate([(10, 60), (20, 80)])]
         fig = app.build_map(profiles, trajectory=[], selected=None)
         self.assertEqual(len(fig.data), 4)
-        self.assertAlmostEqual(fig.layout.map.center.lon, 70)
+        # Centred on the data, nudged right so it sits in the gap between the side panels.
+        self.assertGreater(fig.layout.map.center.lon, 70)
+        self.assertLess(fig.layout.map.center.lon, 73)
+        self.assertAlmostEqual(fig.layout.map.center.lat, 15)
         self.assertGreater(fig.layout.map.zoom, 2)
+
+    def test_float_list_loading_and_empty_states(self):
+        loading, _ = app.render_float_list(None, '', None)
+        self.assertTrue(all(row.className == 'skeleton-row' for row in loading))
+        self.assertIn('No floats yet', str(app.render_float_list([], '', None)[0]))
 
     def test_float_list_search_and_selection(self):
         floats = [dict(wmo_id='2902115', dac='IN', n_profiles=238, first='2013-11-24', last='2017-10-09'),
