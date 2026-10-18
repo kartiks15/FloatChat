@@ -222,6 +222,15 @@ class PostgresIntegrationTests(unittest.TestCase):
         nitrate = analysis.run_analysis(region='equator', measure='nitrate')
         self.assertIn('These profiles have no nitrate measurements.', nitrate['diagnosis'])
 
+    def test_ocean_boxes_follow_australia(self):
+        # Water south of Australia west of Tasmania (~147°E) is Indian Ocean, not Pacific.
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder, [(1, -55.0, 136.0, '2024-03-01', 10), (2, 15.0, 130.0, '2024-03-01', 29)])
+        pacific = analysis.run_analysis(region='pacific_ocean', group_by='none')
+        self.assertEqual(pacific['series'][0]['points'][0]['y'], 29)       # only the Philippine Sea profile
+        indian = analysis.run_analysis(region='indian_ocean', group_by='none')
+        self.assertEqual(indian['series'][0]['points'][0]['y'], 10)        # only the profile south of Australia
+
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()
         try:

@@ -9,7 +9,9 @@ class Arguments(BaseModel):
 
 
 # Named areas the model (or the Regions tab) may pick instead of inventing coordinates.
-# Ocean boxes are rough rectangles, so they are always labelled approximate.
+# Ocean boxes are rough rectangles, so they are always labelled approximate. The Indian/Pacific
+# boundary runs through Indonesia north of Australia but down from Tasmania (~147°E) south of it,
+# so each of those oceans adds a second box ("extra_boxes": (lat_min, lat_max, lon_min, lon_max)).
 REGIONS = {
     "equator": dict(lat_min=-5, lat_max=5, lon_min=-180, lon_max=180, label="Equator",
                     phrase="the equatorial band (5°S–5°N)", approximate=False),
@@ -18,9 +20,11 @@ REGIONS = {
     "bay_of_bengal": dict(lat_min=0, lat_max=23, lon_min=78, lon_max=100, label="Bay of Bengal",
                           phrase="the Bay of Bengal", approximate=False),
     "indian_ocean": dict(lat_min=-60, lat_max=30, lon_min=20, lon_max=120, label="Indian Ocean",
-                         phrase="the Indian Ocean (approximate box)", approximate=True),
-    "pacific_ocean": dict(lat_min=-60, lat_max=60, lon_min=120, lon_max=-70, label="Pacific Ocean",
-                          phrase="the Pacific Ocean (approximate box)", approximate=True),
+                         phrase="the Indian Ocean (approximate box)", approximate=True,
+                         extra_boxes=[(-60, -30, 120, 147)]),
+    "pacific_ocean": dict(lat_min=-60, lat_max=60, lon_min=147, lon_max=-70, label="Pacific Ocean",
+                          phrase="the Pacific Ocean (approximate box)", approximate=True,
+                          extra_boxes=[(-30, 60, 120, 147)]),
     "atlantic_ocean": dict(lat_min=-60, lat_max=65, lon_min=-70, lon_max=20, label="Atlantic Ocean",
                            phrase="the Atlantic Ocean (approximate box)", approximate=True),
     "southern_ocean": dict(lat_min=-90, lat_max=-60, lon_min=-180, lon_max=180, label="Southern Ocean",
@@ -76,21 +80,44 @@ class RegionFilter(Arguments):
         return (*lat, *lon)
 
 
+def region_boxes(key):
+    """Every (lat_min, lat_max, lon_min, lon_max) box making up a named region."""
+    box = REGIONS[key]
+    return [(box["lat_min"], box["lat_max"], box["lon_min"], box["lon_max"])] + box.get("extra_boxes", [])
+
+
+def box_contains(box, lat, lon):
+    lat_min, lat_max, lon_min, lon_max = box
+    inside_lon = lon_min <= lon <= lon_max if lon_min <= lon_max else lon >= lon_min or lon <= lon_max
+    return lat_min <= lat <= lat_max and inside_lon
+
+
+def _box_conditions(box):
+    lat_min, lat_max, lon_min, lon_max = box
+    conditions, params = [], []
+    if (lat_min, lat_max) != (-90, 90):
+        conditions.append("latitude BETWEEN %s AND %s")
+        params += [lat_min, lat_max]
+    if (lon_min, lon_max) != (-180, 180):
+        # A box whose western edge is east of its eastern edge crosses the ±180° line.
+        conditions.append("longitude BETWEEN %s AND %s" if lon_min <= lon_max
+                          else "(longitude >= %s OR longitude <= %s)")
+        params += [lon_min, lon_max]
+    return conditions, params
+
+
 def region_conditions(f):
     """SQL conditions and bound parameters for columns shared by profile_summary and observations."""
     conditions = ["latitude BETWEEN -90 AND 90", "longitude BETWEEN -180 AND 180"]
     params = []
-    bounds = f.bounds()
-    if bounds:
-        lat_min, lat_max, lon_min, lon_max = bounds
-        if (lat_min, lat_max) != (-90, 90):
-            conditions.append("latitude BETWEEN %s AND %s")
-            params += [lat_min, lat_max]
-        if (lon_min, lon_max) != (-180, 180):
-            # A box whose western edge is east of its eastern edge crosses the ±180° line.
-            conditions.append("longitude BETWEEN %s AND %s" if lon_min <= lon_max
-                              else "(longitude >= %s OR longitude <= %s)")
-            params += [lon_min, lon_max]
+    boxes = region_boxes(f.region) if f.region else [f.bounds()] if f.bounds() else []
+    if len(boxes) == 1:
+        box_conditions, params = _box_conditions(boxes[0])
+        conditions += box_conditions
+    elif boxes:
+        parts = [_box_conditions(box) for box in boxes]
+        conditions.append("(" + " OR ".join("(" + (" AND ".join(c) or "TRUE") + ")" for c, _ in parts) + ")")
+        params = [value for _, box_params in parts for value in box_params]
     if f.start_date:
         conditions.append("date_utc >= %s")
         params.append(f.start_date)

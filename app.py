@@ -304,7 +304,8 @@ def security_headers(response):
 
 # ── Components ──────────────────────────────────────────────
 SUGGESTIONS = ["Summarise the dataset", "List floats from INCOIS", "Profiles near 12°N 72°E",
-               "Average temperature on the equator, Mar–Jun"]
+               "Compare oxygen in the Arabian Sea and Bay of Bengal by month",
+               "Mean temperature in the Pacific Ocean"]
 
 
 def icon(name, extra=""):

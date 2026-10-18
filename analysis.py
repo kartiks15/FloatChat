@@ -13,7 +13,8 @@ import numpy
 from pydantic import Field, model_validator
 
 from database import QueryLimitError, fetch_rows
-from regions import REGIONS, RegionFilter, describe_filter, filter_dict, region_conditions, region_phrase
+from regions import (REGIONS, RegionFilter, box_contains, describe_filter, filter_dict, region_boxes,
+                     region_conditions, region_phrase)
 
 MEASURES = {  # key -> (column, label, units)
     "temp": ("temp", "Temperature", "°C"),
@@ -274,10 +275,8 @@ def _coverage(bucket):
     if row["profiles"]:
         lat = (row["lat_min"] + row["lat_max"]) / 2
         lon = (row["lon_min"] + row["lon_max"]) / 2
-        for box in REGIONS.values():
-            inside_lon = (box["lon_min"] <= lon <= box["lon_max"] if box["lon_min"] <= box["lon_max"]
-                          else lon >= box["lon_min"] or lon <= box["lon_max"])
-            if box["approximate"] and box["lat_min"] <= lat <= box["lat_max"] and inside_lon:
+        for key, box in REGIONS.items():
+            if box["approximate"] and any(box_contains(b, lat, lon) for b in region_boxes(key)):
                 area = box["label"]
                 break
     return {"floats": row["floats"], "profiles": row["profiles"], "first_date": _day(row["first_date"]),

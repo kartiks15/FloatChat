@@ -56,8 +56,9 @@ class RegionFilterTests(unittest.TestCase):
         from regions import REGIONS, RegionName, region_phrase
         self.assertEqual(set(get_args(RegionName)), set(REGIONS))
         sql, params = region_conditions(RegionFilter(region='pacific_ocean'))
-        self.assertIn('(longitude >= %s OR longitude <= %s)', sql)
-        self.assertEqual(params[-2:], [120, -70])
+        self.assertIn('((latitude BETWEEN %s AND %s AND (longitude >= %s OR longitude <= %s)) OR '
+                      '(latitude BETWEEN %s AND %s AND longitude BETWEEN %s AND %s))', sql)
+        self.assertEqual(params[-8:], [-60, 60, 147, -70, -30, 60, 120, 147])
         self.assertEqual(describe_filter(RegionFilter(region='pacific_ocean', months=[3])), 'Pacific Ocean (approx.) · Mar')
         self.assertEqual(region_phrase(RegionFilter(region='pacific_ocean')), 'the Pacific Ocean (approximate box)')
         self.assertEqual(region_phrase(RegionFilter(lat_min=0, lat_max=10, lon_min=60, lon_max=70)), 'the box 0°–10°N, 60°E–70°E')
