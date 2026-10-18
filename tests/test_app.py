@@ -159,7 +159,8 @@ class DashboardTests(unittest.TestCase):
         result = {'status': 'ok', 'n_profiles': 2, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'series': []}
         with patch('app.run_analysis', return_value=result) as run:
             chart, highlight, feedback = app.region_chart(1, 'equator', [3, 4], 'temp', 'month_of_year')
-        run.assert_called_once_with(region='equator', months=[3, 4], measure='temp', group_by='month_of_year')
+        run.assert_called_once_with(region='equator', months=[3, 4], measure='temp', group_by='month_of_year',
+                                    stat='mean', chart='auto')
         self.assertEqual((chart, highlight['label'], feedback), (result, '5°S–5°N', ''))
 
     def test_region_chart_with_no_matches_clears_highlight(self):
@@ -172,6 +173,30 @@ class DashboardTests(unittest.TestCase):
         with patch('app.run_analysis', side_effect=RuntimeError('password=secret')):
             feedback = app.region_chart(1, 'equator', [], 'temp', 'week')[2]
         self.assertNotIn('secret', feedback)
+
+    def test_analyze_tab_passes_every_field(self):
+        result = {'status': 'ok', 'n_profiles': 1, 'filter': {'region': 'pacific_ocean'}, 'filter_label': 'x', 'series': []}
+        with patch('app.run_analysis', return_value=result) as run:
+            app.region_chart(1, 'pacific_ocean', [], 'psal', 'none', 'max', 'scatter', 'temp')
+        run.assert_called_once_with(region='pacific_ocean', measure='psal', group_by='none', stat='max',
+                                    chart='scatter', x_measure='temp')
+
+    def test_analyze_tab_explains_unsupported_combinations(self):
+        feedback = app.region_chart(1, 'equator', [], 'profiles', 'month', 'mean', 'auto', None)[2]
+        self.assertEqual(feedback, "That combination isn't supported: Profile counts use stat count.")
+
+    def test_analyze_tab_lists_oceans(self):
+        def find(node, target):
+            if getattr(node, 'id', None) == target:
+                return node
+            children = getattr(node, 'children', None)
+            for child in children if isinstance(children, list) else [children] if children is not None else []:
+                found = find(child, target)
+                if found is not None:
+                    return found
+        labels = [o['label'] for o in find(app.app.layout, 'region-select').options]
+        self.assertIn('Pacific Ocean (approx.)', labels)
+        self.assertEqual(find(app.app.layout, 'tab-regions').children[1], 'Analyze')
 
 
 if __name__ == '__main__':

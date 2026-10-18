@@ -236,6 +236,7 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .field-label { font-size: 12px; font-weight: 500; color: var(--ink-2); }
 .field-help { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.5; }
 .field-help:empty { display: none; }
+#pane-regions { overflow-y: auto; }   /* the Analyze form is taller than the panel on short screens */
 .region-actions { display: flex; gap: 8px; }
 .region-actions .btn { flex: 1; }
 .key-row { display: flex; gap: 6px; }

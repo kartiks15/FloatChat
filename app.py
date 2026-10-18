@@ -18,6 +18,7 @@ import logging
 import math
 import os
 
+from pydantic import ValidationError
 from dash import Dash, dcc, html, Input, Output, State, ctx, no_update, ALL, Patch, clientside_callback
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -405,9 +406,19 @@ def ai_settings():
     ], className="ai-settings", id="ai-settings", hidden=not useful)
 
 
-REGION_LABELS = {"equator": "Equator (5°S–5°N)", "arabian_sea": "Arabian Sea", "bay_of_bengal": "Bay of Bengal"}
-GROUP_OPTIONS = [("month_of_year", "By calendar month"), ("month", "By month"), ("week", "By week"),
-                 ("pressure", "By depth")]
+REGION_OPTIONS = [{"label": box["label"] + (" (approx.)" if box["approximate"] else ""), "value": key}
+                  for key, box in REGIONS.items()]
+STAT_OPTIONS = [("mean", "Mean"), ("median", "Median"), ("min", "Minimum"), ("max", "Maximum"),
+                ("std", "Standard deviation"), ("count", "Count"), ("p10", "10th percentile"), ("p90", "90th percentile")]
+GROUP_OPTIONS = [("none", "None (one value)"), ("day", "By day"), ("week", "By week"), ("month", "By month"),
+                 ("year", "By year"), ("month_of_year", "By calendar month"), ("depth", "By depth"),
+                 ("float", "By float"), ("lat_band", "By latitude band"), ("lon_band", "By longitude band")]
+CHART_OPTIONS = [("auto", "Automatic"), ("line", "Line"), ("bar", "Bar"), ("scatter", "Scatter"),
+                 ("histogram", "Histogram"), ("profile", "Depth profile"), ("map", "Map")]
+
+
+def options(pairs):
+    return [{"label": label, "value": value} for value, label in pairs]
 
 
 def field(label, control_id, control):
@@ -415,26 +426,31 @@ def field(label, control_id, control):
 
 
 def regions_pane():
-    """Highlight and chart a region from fixed choices; the same operations the assistant uses."""
+    """Every analysis option from dropdowns: the same engine the assistant uses, no AI needed."""
     dropdown = dict(clearable=False, searchable=False, className="dd")
+    measurements = [(key, label) for key, (_, label, _) in MEASURES.items() if key != "profiles"]
     return html.Div([
-        html.P("Highlight every profile in a region, or chart the average of a measurement across them. "
-               "No AI key needed.", className="field-help"),
-        field("Region", "region-select", dcc.Dropdown(
-            id="region-select", options=[{"label": label, "value": key} for key, label in REGION_LABELS.items()],
-            value="equator", **dropdown)),
+        html.P("Chart any statistic for a region, or highlight its profiles. No AI key needed.",
+               className="field-help"),
+        field("Region", "region-select", dcc.Dropdown(id="region-select", options=REGION_OPTIONS,
+                                                      value="equator", **dropdown)),
         field("Months", "months-select", dcc.Dropdown(
             id="months-select", options=[{"label": name, "value": i + 1} for i, name in enumerate(MONTH_NAMES)],
             multi=True, placeholder="All months", searchable=False, className="dd")),
         field("Measurement", "variable-select", dcc.Dropdown(
-            id="variable-select", options=[{"label": label, "value": key} for key, (_, label, _) in MEASURES.items()
-                                           if key != "profiles"],
+            id="variable-select", options=options(measurements + [("profiles", "Profile count")]),
             value="temp", **dropdown)),
-        field("Chart", "group-select", dcc.Dropdown(
-            id="group-select", options=[{"label": label, "value": value} for value, label in GROUP_OPTIONS],
-            value="month_of_year", **dropdown)),
+        field("Statistic", "stat-select", dcc.Dropdown(id="stat-select", options=options(STAT_OPTIONS),
+                                                       value="mean", **dropdown)),
+        field("Group by", "group-select", dcc.Dropdown(id="group-select", options=options(GROUP_OPTIONS),
+                                                       value="month_of_year", **dropdown)),
+        field("Chart", "chart-select", dcc.Dropdown(id="chart-select", options=options(CHART_OPTIONS),
+                                                    value="auto", **dropdown)),
+        field("Against (scatter)", "x-measure-select", dcc.Dropdown(
+            id="x-measure-select", options=options(measurements), value=None, clearable=True, searchable=False,
+            placeholder="Second measurement", className="dd")),
         html.Div([html.Button("Highlight", id="region-highlight-btn", n_clicks=0, className="btn btn-ghost"),
-                  html.Button("Chart average", id="region-chart-btn", n_clicks=0, className="btn btn-primary")],
+                  html.Button("Chart", id="region-chart-btn", n_clicks=0, className="btn btn-primary")],
                  className="region-actions"),
         html.Div(id="region-feedback", className="field-help", role="status"),
     ], id="pane-regions", className="pane is-hidden")
@@ -473,7 +489,7 @@ app.layout = html.Div([
                 html.Div([
                     html.Button([icon("list"), "Floats"], id="tab-floats", n_clicks=0,
                                 className="tab is-active", role="tab"),
-                    html.Button([icon("pin"), "Regions"], id="tab-regions", n_clicks=0, className="tab", role="tab"),
+                    html.Button([icon("pin"), "Analyze"], id="tab-regions", n_clicks=0, className="tab", role="tab"),
                     html.Button([icon("sparkle"), "Ask AI"], id="tab-chat", n_clicks=0, className="tab", role="tab"),
                 ], id="tabs", className="tabs", role="tablist"),
 
@@ -770,14 +786,21 @@ def region_highlight(n_clicks, region, months):
     State("months-select", "value"),
     State("variable-select", "value"),
     State("group-select", "value"),
+    State("stat-select", "value"),
+    State("chart-select", "value"),
+    State("x-measure-select", "value"),
     prevent_initial_call=True,
     running=[(Output("region-chart-btn", "disabled"), True, False)],
 )
-def region_chart(n_clicks, region, months, measure, group_by):
+def region_chart(n_clicks, region, months, measure, group_by, stat="mean", chart="auto", x_measure=None):
     args = {key: value for key, value in dict(region=region, months=months or None, measure=measure,
-                                              group_by=group_by).items() if value is not None}
+                                              group_by=group_by, stat=stat, chart=chart,
+                                              x_measure=x_measure).items() if value is not None}
     try:
         result = run_analysis(**args)   # too much or too little data comes back as a status, not an error
+    except ValidationError as exc:
+        reason = exc.errors()[0]["msg"].removeprefix("Value error, ")
+        return no_update, no_update, f"That combination isn't supported: {reason}"
     except ValueError:
         return no_update, no_update, "Choose a region from the list."
     except Exception as exc:
