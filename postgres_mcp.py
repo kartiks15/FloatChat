@@ -38,5 +38,29 @@ def get_float_trajectory(wmo_id: str) -> str:
     return json.dumps(execute_tool("trajectory", {"wmo_id": wmo_id}), default=str)
 
 
+def _given(arguments):
+    return {name: value for name, value in arguments.items() if value is not None}
+
+
+@mcp.tool()
+def find_region_profiles(region: str | None = None, lat_min: float | None = None, lat_max: float | None = None,
+                         lon_min: float | None = None, lon_max: float | None = None,
+                         start_date: str | None = None, end_date: str | None = None,
+                         months: list[int] | None = None, wmo_id: str | None = None) -> str:
+    """Count and list every profile in a named region (equator, arabian_sea, bay_of_bengal) or a box."""
+    return json.dumps(execute_tool("region_profiles", _given(locals())), default=str)
+
+
+@mcp.tool()
+def aggregate_measurements(variable: str = "temp", group_by: str = "month", pres_min: float = 0,
+                           pres_max: float | None = None, bin_dbar: int = 50, region: str | None = None,
+                           lat_min: float | None = None, lat_max: float | None = None,
+                           lon_min: float | None = None, lon_max: float | None = None,
+                           start_date: str | None = None, end_date: str | None = None,
+                           months: list[int] | None = None, wmo_id: str | None = None) -> str:
+    """Mean of per-profile means by week, month, month_of_year or pressure bin."""
+    return json.dumps(execute_tool("aggregate_measurements", _given(locals())), default=str)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
