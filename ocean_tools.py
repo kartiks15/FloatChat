@@ -244,6 +244,63 @@ def region_points(**kwargs):
     return {"rows": [dict(row, date_utc=_day(row["date_utc"])) for row in rows], "truncated": len(rows) == 5000}
 
 
+VARIABLES = {  # key -> (column, label, units); the only column names that reach SQL
+    "temp": ("temp", "Temperature", "°C"),
+    "psal": ("psal", "Salinity", "PSU"),
+    "doxy": ("doxy", "Oxygen", "µmol/kg"),
+    "chla": ("chla", "Chlorophyll-a", "mg/m³"),
+    "nitrate": ("nitrate", "Nitrate", "µmol/kg"),
+    "bbp700": ("bbp700", "Backscatter 700 nm", "m⁻¹"),
+}
+BUCKETS = {
+    "week": "to_char(date_trunc('week', date_utc), 'YYYY-MM-DD')",
+    "month": "to_char(date_trunc('month', date_utc), 'YYYY-MM')",
+    "month_of_year": "EXTRACT(MONTH FROM date_utc)::int",
+    "pressure": "FLOOR(pres / %s) * %s",
+}
+
+
+class AggregateArgs(RegionFilter):
+    variable: Literal["temp", "psal", "doxy", "chla", "nitrate", "bbp700"] = "temp"
+    group_by: Literal["week", "month", "month_of_year", "pressure"] = "month"
+    pres_min: float = Field(default=0, ge=0, le=6000, allow_inf_nan=False)
+    pres_max: float | None = Field(default=None, gt=0, le=6000, allow_inf_nan=False)
+    bin_dbar: int = Field(default=50, ge=10, le=500)
+
+    @model_validator(mode="after")
+    def valid_layer(self):
+        if self.pres_max is not None and self.pres_max <= self.pres_min:
+            raise ValueError("pres_max must exceed pres_min.")
+        return self
+
+
+def aggregate_measurements(**kwargs):
+    """Mean of per-profile means, so profiles with many levels (or two grids) count once."""
+    args = AggregateArgs(**kwargs)
+    column, label, units = VARIABLES[args.variable]
+    pres_max = args.pres_max
+    if pres_max is None:  # a surface layer over time; the whole column for a depth profile
+        pres_max = max(2000, args.pres_min + args.bin_dbar) if args.group_by == "pressure" else args.pres_min + 10
+    conditions, region_params = region_conditions(args)
+    where = " AND ".join([f"{column} IS NOT NULL", "pres >= %s", "pres <= %s", *conditions])
+    params = [args.pres_min, pres_max] + region_params
+    bucket_params = [args.bin_dbar, args.bin_dbar] if args.group_by == "pressure" else []
+    rows = fetch_rows(f"""WITH per_profile AS (
+            SELECT profile_id, wmo_id, {BUCKETS[args.group_by]} AS bucket, AVG({column}) AS value
+            FROM observations WHERE {where} GROUP BY profile_id, wmo_id, 3)
+        SELECT bucket, AVG(value) AS mean, STDDEV_SAMP(value) AS std, MIN(value) AS min, MAX(value) AS max,
+            COUNT(*) AS n_profiles, COUNT(DISTINCT wmo_id) AS n_floats
+        FROM per_profile GROUP BY bucket ORDER BY bucket""", bucket_params + params, max_rows=1000)
+    totals = fetch_rows(f"""SELECT COUNT(DISTINCT profile_id) AS n_profiles, COUNT(DISTINCT wmo_id) AS n_floats,
+        MIN(date_utc) AS first_date, MAX(date_utc) AS last_date FROM observations WHERE {where}""", params)[0]
+    return {"variable": args.variable, "label": label, "units": units, "group_by": args.group_by,
+            "pressure_range": [args.pres_min, pres_max], "bin_dbar": args.bin_dbar,
+            "rows": [dict(row) for row in rows], "n_profiles": totals["n_profiles"], "n_floats": totals["n_floats"],
+            "first_date": _day(totals["first_date"]), "last_date": _day(totals["last_date"]),
+            "filter": filter_dict(args), "filter_label": describe_filter(args),
+            "dashboard": "The dashboard charts these values and highlights the profiles on the map."}
+
+
 def profile_data(profile_id):
     meta = fetch_rows("SELECT * FROM profile_summary WHERE profile_id=%s", [profile_id])
     rows = fetch_rows("""SELECT pres, temp, psal, doxy, chla, nitrate, bbp700,
@@ -270,12 +327,17 @@ TOOLS = {
                         "Count, list and highlight every profile inside a named region (equator, arabian_sea, "
                         "bay_of_bengal) or a latitude/longitude box, optionally by dates, calendar months (1–12) "
                         "or float."),
+    "aggregate_measurements": (AggregateArgs, aggregate_measurements,
+                               "Average a variable (default temperature) over every profile matching a region, "
+                               "dates, calendar months or float. group_by week, month, month_of_year (seasonal, "
+                               "across years) or pressure (mean depth profile). Default layer 0–10 dbar. Use for "
+                               "averages, trends and graphs."),
 }
 
 
 class ToolPlan(Arguments):
     tool: Literal["dataset_summary", "list_floats", "search_profiles", "profile_data", "trajectory",
-                  "region_profiles"]
+                  "region_profiles", "aggregate_measurements"]
     arguments: dict = Field(default_factory=dict)
 
 

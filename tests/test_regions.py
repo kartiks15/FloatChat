@@ -3,8 +3,8 @@ import unittest
 from datetime import date, datetime
 from unittest.mock import patch
 
-from ocean_tools import (RegionFilter, describe_filter, execute_tool, filter_dict, region_conditions,
-                         region_points)
+from ocean_tools import (RegionFilter, aggregate_measurements, describe_filter, execute_tool, filter_dict,
+                         region_conditions, region_points)
 
 
 class RegionFilterTests(unittest.TestCase):
@@ -65,6 +65,25 @@ class RegionFilterTests(unittest.TestCase):
         with patch('ocean_tools.fetch_rows', return_value=[{'profile_id': i, 'date_utc': None} for i in range(5000)]) as fetch:
             self.assertTrue(region_points(region='equator')['truncated'])
         self.assertIn('LIMIT 5000', fetch.call_args.args[0])
+
+    def test_aggregate_sql_uses_whitelisted_column_and_bound_values(self):
+        with patch('ocean_tools.fetch_rows', side_effect=[[], [{'n_profiles': 0, 'n_floats': 0, 'first_date': None, 'last_date': None}]]) as fetch:
+            result = execute_tool('aggregate_measurements', {'region': 'equator', 'variable': 'doxy', 'group_by': 'month_of_year'})
+        sql, params = fetch.call_args_list[0].args
+        self.assertIn('AVG(doxy)', sql)
+        self.assertIn('EXTRACT(MONTH FROM date_utc)', sql)
+        self.assertEqual(params[:2], [0, 10])          # default surface layer
+        self.assertEqual((result['rows'], result['units']), ([], 'µmol/kg'))
+
+    def test_aggregate_rejects_unknown_variable_and_bad_layers(self):
+        for bad in [{'variable': 'temp; DROP TABLE floats'}, {'group_by': 'year'},
+                    {'pres_min': 50, 'pres_max': 10}, {'bin_dbar': 5}]:
+            with self.assertRaises(ValueError):
+                execute_tool('aggregate_measurements', bad)
+
+    def test_aggregate_pressure_defaults_to_full_depth(self):
+        with patch('ocean_tools.fetch_rows', side_effect=[[], [{'n_profiles': 0, 'n_floats': 0, 'first_date': None, 'last_date': None}]]):
+            self.assertEqual(aggregate_measurements(group_by='pressure')['pressure_range'], [0, 2000])
 
 
 if __name__ == '__main__':
