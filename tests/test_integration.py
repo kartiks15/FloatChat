@@ -5,6 +5,7 @@ CI supplies TEST_DATABASE_URL. These tests never use the developer's .env databa
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 import psycopg2
@@ -14,6 +15,27 @@ import argo_etl as etl
 import database
 import ocean_tools
 from test_etl import make_fixture
+
+
+def juld(day):  # days since 1950-01-01, as stored in Argo files
+    return (datetime.fromisoformat(day) - datetime(1950, 1, 1)).days
+
+
+EQUATOR_FIXTURES = [  # (cycle, lat, lon, date, temp)
+    (1, 0.5, 80, '2024-03-15', 28),   # A: in band, March 2024
+    (2, -1.0, 85, '2024-04-15', 26),  # B: in band, April 2024
+    (3, 12.0, 72, '2024-03-20', 30),  # C: Arabian Sea, outside band
+    (4, 1.0, 82, '2023-05-10', 27),   # D: in band, May of another year
+    (5, 0.0, 80, '2024-08-01', 25),   # E: in band, outside March–June
+]
+
+
+def load_fixtures(conn, folder, fixtures=EQUATOR_FIXTURES, prefix='D'):
+    for cycle, lat, lon, day, temp in fixtures:
+        path = Path(folder) / f'{prefix}2902115_{cycle:03d}.nc'
+        make_fixture(path, temp, latitude=lat, longitude=lon, juld=juld(day), cycle=cycle)
+        assert etl.process_file(conn, path)['error'] is None
+    assert etl.refresh_summary(conn)
 
 
 @unittest.skipUnless(os.getenv('TEST_DATABASE_URL'), 'Set TEST_DATABASE_URL to a disposable PostgreSQL *_test database')
@@ -91,6 +113,20 @@ class PostgresIntegrationTests(unittest.TestCase):
             self.assertEqual(len(result['rows']), 1)
             self.assertLess(result['rows'][0]['distance_km'], 25)
             self.assertEqual(ocean_tools.search_profiles(latitude=12, longitude=-179.9, radius_km=1)['rows'], [])
+
+    def test_region_profiles_equator_march_to_june(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder)
+        result = ocean_tools.region_profiles(region='equator', months=[3, 4, 5, 6])
+        self.assertEqual((result['n_profiles'], result['n_floats']), (3, 1))
+        self.assertEqual((result['first_date'], result['last_date']), ('2023-05-10', '2024-04-15'))
+        self.assertEqual(len(ocean_tools.region_points(region='equator')['rows']), 4)
+
+    def test_region_profiles_across_antimeridian(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder, [(1, 0, -179.5, '2024-03-01', 28), (2, 0, 100, '2024-03-01', 28)])
+        result = ocean_tools.region_profiles(lat_min=-5, lat_max=5, lon_min=170, lon_max=-170)
+        self.assertEqual(result['n_profiles'], 1)
 
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()

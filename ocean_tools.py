@@ -213,6 +213,37 @@ def search_profiles(**kwargs):
     return {"rows": rows[:args.limit], "truncated": len(rows) > args.limit}
 
 
+def _day(value):
+    return str(value)[:10] if value else None
+
+
+def region_profiles(**kwargs):
+    """Counts and floats for every profile in the filter; the dashboard highlights them."""
+    f = RegionFilter(**kwargs)
+    conditions, params = region_conditions(f)
+    where = " AND ".join(conditions)
+    totals = fetch_rows(f"""SELECT COUNT(*) AS n_profiles, COUNT(DISTINCT wmo_id) AS n_floats,
+        MIN(date_utc) AS first_date, MAX(date_utc) AS last_date FROM profile_summary WHERE {where}""", params)[0]
+    floats = fetch_rows(f"""SELECT wmo_id, COUNT(*) AS n_profiles, MIN(date_utc) AS first_date,
+        MAX(date_utc) AS last_date FROM profile_summary WHERE {where}
+        GROUP BY wmo_id ORDER BY n_profiles DESC, wmo_id LIMIT 101""", params)
+    return {"n_profiles": totals["n_profiles"], "n_floats": totals["n_floats"],
+            "first_date": _day(totals["first_date"]), "last_date": _day(totals["last_date"]),
+            "floats": [{"wmo_id": r["wmo_id"], "n_profiles": r["n_profiles"], "first_date": _day(r["first_date"]),
+                        "last_date": _day(r["last_date"])} for r in floats[:100]],
+            "truncated": len(floats) > 100, "filter": filter_dict(f), "label": describe_filter(f),
+            "dashboard": "The map highlights these profiles."}
+
+
+def region_points(**kwargs):
+    """Map positions for a filter, newest first; not a model tool."""
+    conditions, params = region_conditions(RegionFilter(**kwargs))
+    rows = fetch_rows(f"""SELECT profile_id, wmo_id, latitude, longitude, date_utc FROM profile_summary
+        WHERE {' AND '.join(conditions)} ORDER BY date_utc DESC NULLS LAST, profile_id DESC LIMIT 5000""",
+        params, max_rows=5000)
+    return {"rows": [dict(row, date_utc=_day(row["date_utc"])) for row in rows], "truncated": len(rows) == 5000}
+
+
 def profile_data(profile_id):
     meta = fetch_rows("SELECT * FROM profile_summary WHERE profile_id=%s", [profile_id])
     rows = fetch_rows("""SELECT pres, temp, psal, doxy, chla, nitrate, bbp700,
@@ -235,11 +266,16 @@ TOOLS = {
     "search_profiles": (SearchArgs, search_profiles, "Find profiles by inclusive dates, float, or distance from a coordinate."),
     "profile_data": (ProfileArgs, profile_data, "Measurements at pressure levels for a profile ID, with provenance."),
     "trajectory": (FloatArgs, trajectory, "Locations and dates for a float's trajectory."),
+    "region_profiles": (RegionFilter, region_profiles,
+                        "Count, list and highlight every profile inside a named region (equator, arabian_sea, "
+                        "bay_of_bengal) or a latitude/longitude box, optionally by dates, calendar months (1–12) "
+                        "or float."),
 }
 
 
 class ToolPlan(Arguments):
-    tool: Literal["dataset_summary", "list_floats", "search_profiles", "profile_data", "trajectory"]
+    tool: Literal["dataset_summary", "list_floats", "search_profiles", "profile_data", "trajectory",
+                  "region_profiles"]
     arguments: dict = Field(default_factory=dict)
 
 

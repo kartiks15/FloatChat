@@ -1,8 +1,10 @@
 import json
 import unittest
-from datetime import date
+from datetime import date, datetime
+from unittest.mock import patch
 
-from ocean_tools import RegionFilter, describe_filter, filter_dict, region_conditions
+from ocean_tools import (RegionFilter, describe_filter, execute_tool, filter_dict, region_conditions,
+                         region_points)
 
 
 class RegionFilterTests(unittest.TestCase):
@@ -48,6 +50,21 @@ class RegionFilterTests(unittest.TestCase):
     def test_filter_dict_round_trips(self):
         f = RegionFilter(region='equator', months=[3, 4], start_date='2024-01-01')
         self.assertEqual(RegionFilter(**json.loads(json.dumps(filter_dict(f)))), f)
+
+    def test_region_profiles_queries_summary_with_bound_parameters(self):
+        with patch('ocean_tools.fetch_rows', side_effect=[
+                [{'n_profiles': 2, 'n_floats': 1, 'first_date': datetime(2024, 3, 1), 'last_date': datetime(2024, 4, 1)}],
+                [{'wmo_id': '2902115', 'n_profiles': 2, 'first_date': datetime(2024, 3, 1), 'last_date': datetime(2024, 4, 1)}]]) as fetch:
+            result = execute_tool('region_profiles', {'region': 'equator', 'months': [3, 4]})
+        self.assertTrue(all('profile_summary' in call.args[0] for call in fetch.call_args_list))
+        self.assertEqual((result['n_profiles'], result['first_date'], result['label']), (2, '2024-03-01', '5°S–5°N · Mar–Apr'))
+        self.assertEqual(result['filter'], {'region': 'equator', 'months': [3, 4]})
+        json.dumps(result)  # must be JSON-safe for the dashboard store
+
+    def test_region_points_caps_at_5000(self):
+        with patch('ocean_tools.fetch_rows', return_value=[{'profile_id': i, 'date_utc': None} for i in range(5000)]) as fetch:
+            self.assertTrue(region_points(region='equator')['truncated'])
+        self.assertIn('LIMIT 5000', fetch.call_args.args[0])
 
 
 if __name__ == '__main__':
