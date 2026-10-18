@@ -28,6 +28,8 @@ from dotenv import load_dotenv
 from database import QueryLimitError, fetch_rows
 from chat_service import (answer_question, ai_enabled, dashboard_actions, user_keys_allowed, openrouter_models,
                           MAX_QUERY_CHARS)
+from theme import (ACCENT, AXIS, BASE_LAYOUT, BORDER, COLORS, FONT, HIGHLIGHT, INK, INK_2, MONO, MUTED,  # noqa: F401
+                   PRESSURE_SCALE, PROFILE_DOT, SURFACE_2, placeholder_figure, plural, translucent)
 from ocean_tools import (MONTH_NAMES, REGIONS, VARIABLES, RegionFilter, ToolPlan, aggregate_measurements,
                          describe_filter, filter_dict, region_points)
 
@@ -84,49 +86,18 @@ def fmt_position(lat, lon):
     return f"{abs(lat):.2f}°{'N' if lat >= 0 else 'S'}, {abs(lon):.2f}°{'E' if lon >= 0 else 'W'}"
 
 
-# ── Design tokens (mirrored in assets/style.css) ───────────
-FONT = "Geist, system-ui, -apple-system, 'Segoe UI', sans-serif"
-MONO = "'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace"
-SURFACE_2 = "#232327"
-BORDER = "#2e2e33"
-GRID = "#26262b"
-INK = "#f4f4f5"
-INK_2 = "#a1a1aa"
-MUTED = "#8b8b94"
-ACCENT = "#34d399"          # the one UI accent (emerald)
-HIGHLIGHT = "#fbbf24"       # profiles highlighted by a region (amber, distinct from the selection)
-PROFILE_DOT = "#a1a1aa"
+# ── Design tokens: theme.py (mirrored in assets/style.css) ──
 # Map trace slots: the highlight sits above the grey dots and below the selection.
 TRACE_PROFILES, TRACE_HIGHLIGHT, TRACE_TRAJECTORY, TRACE_HALO, TRACE_DOT = range(5)
-# Data series, validated with the dataviz palette checks against the #18181b panel surface.
-COLORS = {"temp": "#d95926", "psal": "#3987e5", "doxy": "#3987e5",
-          "chla": "#199e70", "nitrate": "#c98500", "bbp700": "#d55181"}
-PRESSURE_SCALE = [[0, "#b7d3f6"], [0.5, "#5598e7"], [1, "#1c5cab"]]  # one hue, shallow → deep
 BGC_VARIABLES = [("doxy", "Oxygen (µmol/kg)"), ("chla", "Chlorophyll-a (mg/m³)"),
                  ("nitrate", "Nitrate (µmol/kg)"), ("bbp700", "Backscatter 700 nm (m⁻¹)")]
 # On wide screens the map sits under a 340 px left panel and a 420 px right panel;
 # shifting the centre by half the difference frames data in the visible gap.
 PANEL_OFFSET_PX = 40
 
-AXIS = dict(gridcolor=GRID, linecolor=BORDER, zeroline=False,
-            tickfont=dict(family=MONO, color=MUTED, size=10), title=dict(font=dict(color=INK_2, size=12)))
-BASE_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family=FONT, color=INK_2, size=12),
-    margin=dict(l=56, r=16, t=36, b=44),
-    hoverlabel=dict(bgcolor=SURFACE_2, bordercolor=BORDER, font=dict(family=FONT, color=INK, size=12)),
-)
 
 
 # ── Figures ────────────────────────────────────────────────
-def placeholder_figure(message, height=200):
-    fig = go.Figure()
-    fig.update_layout(**BASE_LAYOUT, height=height, xaxis=dict(visible=False), yaxis=dict(visible=False))
-    fig.add_annotation(text=message, x=0.5, y=0.5, xref="paper", yref="paper",
-                       showarrow=False, font=dict(color=MUTED, size=13))
-    return fig
-
-
 def style_subplots(fig, height):
     fig.update_xaxes(**AXIS)
     fig.update_yaxes(**AXIS, autorange="reversed")
@@ -288,15 +259,6 @@ def build_ts_diagram(wmo_id=None):
     fig.update_layout(**BASE_LAYOUT, height=300)
     fig.update_layout(margin=dict(l=60, r=12, t=12, b=44))
     return fig
-
-
-def plural(count, noun):
-    return f"{count:,} {noun}{'' if count == 1 else 's'}"
-
-
-def translucent(hex_color, alpha):
-    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
-    return f"rgba({r}, {g}, {b}, {alpha})"
 
 
 def build_analysis_chart(spec):
