@@ -1,6 +1,7 @@
 import json
 import unittest
 from datetime import date, datetime
+from typing import get_args
 from unittest.mock import patch
 
 from ocean_tools import (RegionFilter, aggregate_measurements, describe_filter, execute_tool, filter_dict,
@@ -50,6 +51,17 @@ class RegionFilterTests(unittest.TestCase):
     def test_filter_dict_round_trips(self):
         f = RegionFilter(region='equator', months=[3, 4], start_date='2024-01-01')
         self.assertEqual(RegionFilter(**json.loads(json.dumps(filter_dict(f)))), f)
+
+    def test_ocean_regions(self):
+        from regions import REGIONS, RegionName, region_phrase
+        self.assertEqual(set(get_args(RegionName)), set(REGIONS))
+        sql, params = region_conditions(RegionFilter(region='pacific_ocean'))
+        self.assertIn('(longitude >= %s OR longitude <= %s)', sql)
+        self.assertEqual(params[-2:], [120, -70])
+        self.assertEqual(describe_filter(RegionFilter(region='pacific_ocean', months=[3])), 'Pacific Ocean (approx.) · Mar')
+        self.assertEqual(region_phrase(RegionFilter(region='pacific_ocean')), 'the Pacific Ocean (approximate box)')
+        self.assertEqual(region_phrase(RegionFilter(lat_min=0, lat_max=10, lon_min=60, lon_max=70)), 'the box 0°–10°N, 60°E–70°E')
+        self.assertEqual(region_phrase(RegionFilter()), 'the database')
 
     def test_region_profiles_queries_summary_with_bound_parameters(self):
         with patch('ocean_tools.fetch_rows', side_effect=[

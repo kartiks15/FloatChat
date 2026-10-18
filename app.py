@@ -506,7 +506,7 @@ def regions_pane():
         html.P("Highlight every profile in a region, or chart the average of a measurement across them. "
                "No AI key needed.", className="field-help"),
         field("Region", "region-select", dcc.Dropdown(
-            id="region-select", options=[{"label": REGION_LABELS[key], "value": key} for key in REGIONS],
+            id="region-select", options=[{"label": label, "value": key} for key, label in REGION_LABELS.items()],
             value="equator", **dropdown)),
         field("Months", "months-select", dcc.Dropdown(
             id="months-select", options=[{"label": name, "value": i + 1} for i, name in enumerate(MONTH_NAMES)],
