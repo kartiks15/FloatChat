@@ -231,6 +231,19 @@ class PostgresIntegrationTests(unittest.TestCase):
         indian = analysis.run_analysis(region='indian_ocean', group_by='none')
         self.assertEqual(indian['series'][0]['points'][0]['y'], 10)        # only the profile south of Australia
 
+    def test_scatter_spreads_its_level_cap_across_sampled_profiles(self):
+        # Dense Sprof profiles must not fill the level cap on their own.
+        with tempfile.TemporaryDirectory() as folder:
+            for cycle, lat, lon, day, temp in EQUATOR_FIXTURES:
+                path = Path(folder) / f'D2902115_{cycle:03d}.nc'
+                make_fixture(path, temp, latitude=lat, longitude=lon, juld=juld(day), cycle=cycle,
+                             extra={'PSAL': [35.0, 35.1, 35.2]})
+                self.assertIsNone(etl.process_file(self.conn, path)['error'])
+            self.assertTrue(etl.refresh_summary(self.conn))
+        with patch('analysis.MAX_ROWS', 4):
+            result = analysis.run_analysis(region='equator', chart='scatter', measure='temp', x_measure='psal')
+        self.assertEqual((len(result['points']), result['n_profiles']), (4, 4))
+
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()
         try:

@@ -223,12 +223,18 @@ def _scatter(req, f):
     if not sample:
         return [], 0, 0, []
     x_column, y_column = MEASURES[req.x_measure][0], MEASURES[req.measure][0]
-    rows = fetch_rows(f"""SELECT profile_id, wmo_id, {x_column} AS x, {y_column} AS y, pres FROM observations
-        WHERE profile_id = ANY(%s) AND {x_column} IS NOT NULL AND {y_column} IS NOT NULL
-        AND pres >= %s AND pres <= %s LIMIT %s""",
-        [[row["profile_id"] for row in sample], *req.layer(), MAX_ROWS], max_rows=MAX_ROWS)
+    # Each sampled profile gets an equal share of the level cap, at random depths, so a few dense
+    # profiles can't fill the chart on their own.
+    per_profile = max(1, MAX_ROWS // len(sample))
+    rows = fetch_rows(f"""SELECT profile_id, wmo_id, x, y, pres FROM (
+            SELECT profile_id, wmo_id, {x_column} AS x, {y_column} AS y, pres,
+                ROW_NUMBER() OVER (PARTITION BY profile_id ORDER BY random()) AS rn
+            FROM observations WHERE profile_id = ANY(%s) AND {x_column} IS NOT NULL AND {y_column} IS NOT NULL
+            AND pres >= %s AND pres <= %s) AS levels
+        WHERE rn <= %s LIMIT %s""",
+        [[row["profile_id"] for row in sample], *req.layer(), per_profile, MAX_ROWS], max_rows=MAX_ROWS)
     points = [{"x": row["x"], "y": row["y"], "pres": row["pres"]} for row in rows]
-    note = [f"A random sample of up to {SAMPLE_PROFILES} profiles ({MAX_ROWS:,} levels) is shown."]
+    note = [f"Random levels from a random sample of up to {SAMPLE_PROFILES} profiles ({MAX_ROWS:,} levels at most)."]
     return points, len({row["profile_id"] for row in rows}), len({row["wmo_id"] for row in rows}), note
 
 

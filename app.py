@@ -549,8 +549,12 @@ app.layout = html.Div([
                               html.Button("Close", id="close-analysis", n_clicks=0, className="btn btn-ghost btn-sm")],
                              className="analysis-head"),
                     html.P(id="analysis-message", className="analysis-message"),
+                    # Maps get their own graph: one Plotly graph can't switch between map and cartesian.
                     html.Div(dcc.Graph(id="analysis-chart", figure=placeholder_figure("", height=60),
                                        config={"displayModeBar": False}), id="analysis-graph"),
+                    html.Div(dcc.Graph(id="analysis-map", figure=placeholder_figure("", height=60),
+                                       config={"displayModeBar": False, "scrollZoom": True}),
+                             id="analysis-map-graph", hidden=True),
                     html.P(id="analysis-caption", className="field-help"),
                 ], id="analysis-panel", className="analysis glass", hidden=True),
                 html.Div([
@@ -813,20 +817,26 @@ def region_chart(n_clicks, region, months, measure, group_by, stat="mean", chart
 
 @app.callback(
     Output("analysis-chart", "figure"),
+    Output("analysis-map", "figure"),
     Output("analysis-title", "children"),
     Output("analysis-caption", "children"),
     Output("analysis-message", "children"),
     Output("analysis-graph", "hidden"),
+    Output("analysis-map-graph", "hidden"),
     Output("analysis-panel", "hidden"),
     Input("analysis", "data"),
 )
 def render_analysis(result):
-    """Any analysis result: a chart with its caption, or the reason there is no chart."""
+    """Any analysis result: a chart (or map) with its caption, or the reason there is no chart."""
     if not result:
-        return no_update, "", "", None, True, True
+        return no_update, no_update, "", "", None, True, True, True
     text = describe_result(result)
-    return (build_chart(result), text["title"], text["caption"], text["message"],
-            text["message"] is not None, False)
+    if text["message"] is not None:
+        return no_update, no_update, text["title"], text["caption"], text["message"], True, True, False
+    figure = build_chart(result)
+    is_map = result["chart"] == "map"
+    return (no_update if is_map else figure, figure if is_map else no_update, text["title"], text["caption"],
+            None, is_map, not is_map, False)
 
 
 @app.callback(

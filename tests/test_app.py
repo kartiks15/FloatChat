@@ -151,9 +151,23 @@ class DashboardTests(unittest.TestCase):
         no_data = dict(status='no_data', title='Mean temperature · Pacific Ocean (approx.)', series=[], notes=[],
                        diagnosis='No profiles in the Pacific Ocean (approximate box) at all.', stat='mean',
                        pressure_range=[0, 10], measure='temp', chart='line')
-        _, _, _, message, graph_hidden, panel_hidden = app.render_analysis(no_data)
-        self.assertEqual((message, graph_hidden, panel_hidden), (no_data['diagnosis'], True, False))
-        self.assertTrue(app.render_analysis(None)[5])
+        _, _, _, _, message, chart_hidden, map_hidden, panel_hidden = app.render_analysis(no_data)
+        self.assertEqual((message, chart_hidden, map_hidden, panel_hidden), (no_data['diagnosis'], True, True, False))
+        self.assertTrue(app.render_analysis(None)[7])
+
+    def test_map_results_use_their_own_graph(self):
+        # One Plotly graph can't switch between a map and a cartesian chart, so maps get their own.
+        result = dict(status='ok', title='Oxygen by location · Indian Ocean (approx.)', chart='map', series=[],
+                      points=[dict(lat=0, lon=80, value=200, profile_id=1, wmo_id='1')], notes=[], stat='mean',
+                      measure='doxy', measure_label='Oxygen', units='µmol/kg', pressure_range=[0, 10],
+                      n_profiles=1, n_floats=1, group_by='none', depth_bin=50, x_measure=None)
+        chart_fig, map_fig, *_, chart_hidden, map_hidden, panel_hidden = app.render_analysis(result)
+        self.assertIs(chart_fig, no_update)
+        self.assertEqual(map_fig.data[0].type, 'scattermap')
+        self.assertEqual((chart_hidden, map_hidden, panel_hidden), (True, False, False))
+        histogram = dict(result, chart='histogram', points=[dict(x=200, x0=190, x1=210, y=1)])
+        chart_fig, map_fig, *_, chart_hidden, map_hidden, _ = app.render_analysis(histogram)
+        self.assertEqual((chart_fig.data[0].type, map_fig, chart_hidden, map_hidden), ('bar', no_update, False, True))
 
     def test_region_chart_uses_the_analysis_engine(self):
         result = {'status': 'ok', 'n_profiles': 2, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'series': []}
