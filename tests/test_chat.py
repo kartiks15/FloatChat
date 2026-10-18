@@ -73,6 +73,16 @@ class ChatTests(unittest.TestCase):
         self.assertTrue(result['context_sampled'])
         self.assertEqual(result['returned_rows'], 100)
 
+    def test_context_bounds_analysis_points_too(self):
+        # Analysis results carry their data in points and series[].points, not rows.
+        result = {'status': 'ok', 'chart': 'scatter', 'points': [{'x': 35.0 + i / 1e4, 'y': 28.0, 'pres': i} for i in range(5000)],
+                  'series': [{'name': 'A', 'points': [{'x': f'2024-{i:04d}', 'y': 28.0, 'n_profiles': 3} for i in range(1000)]}]}
+        text = chat.bounded_context(result)
+        context = json.loads(text)
+        self.assertLessEqual(len(text), chat.MAX_CONTEXT_CHARS)
+        self.assertTrue(context['context_sampled'])
+        self.assertGreater(len(context['series'][0]['points']), 0)
+
     def test_ollama_request_uses_native_api_and_no_openai_key(self):
         response = MagicMock()
         response.iter_content.return_value = [b'{"message":{"content":"hello"}}']

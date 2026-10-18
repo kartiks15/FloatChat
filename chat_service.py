@@ -178,16 +178,26 @@ def parse_plan(text):
 
 
 def bounded_context(result):
-    """Preserve valid JSON and disclose omitted measurements to the answer model."""
-    result = dict(result)
-    rows = list(result.get("rows", []))
+    """Preserve valid JSON and disclose omitted data to the answer model.
+
+    Tool data lives in "rows", analysis data in "points" and each series' "points". The largest
+    list is thinned to every other item until the JSON fits, so a series keeps its whole span.
+    """
+    result = json.loads(json.dumps(result, default=str))   # a JSON-safe copy we can thin
     if "rows" in result:
-        result["returned_rows"] = len(rows)
-        while len(json.dumps(result, default=str)) > MAX_CONTEXT_CHARS and rows:
-            rows = rows[:len(rows) // 2]
-            result["rows"] = rows
-            result["context_sampled"] = True
-    return json.dumps(result, default=str)
+        result["returned_rows"] = len(result["rows"])
+    lists = [(owner, key) for owner, key in [(result, "rows"), (result, "points")]
+             + [(series, "points") for series in result.get("series") or [] if isinstance(series, dict)]
+             if isinstance(owner.get(key), list)]
+    text = json.dumps(result)
+    while len(text) > MAX_CONTEXT_CHARS and lists:
+        owner, key = max(lists, key=lambda pair: len(pair[0][pair[1]]))
+        if len(owner[key]) <= 1:
+            break
+        owner[key] = owner[key][::2]
+        result["context_sampled"] = True
+        text = json.dumps(result)
+    return text
 
 
 PLAN_RULES = (
