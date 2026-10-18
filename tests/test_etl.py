@@ -9,7 +9,7 @@ import download_argo
 
 
 def make_fixture(path, temp=20, bad_pressure=False, *, latitude=12, longitude=179.9, juld=27000,
-                 wmo='2902115', cycle=1, data_mode='D'):
+                 wmo='2902115', cycle=1, data_mode='D', extra=None):
     with Dataset(path, 'w') as nc:
         for name, size in [('N_PROF', 1), ('N_LEVELS', 3), ('STRING8', 8)]:
             nc.createDimension(name, size)
@@ -22,6 +22,9 @@ def make_fixture(path, temp=20, bad_pressure=False, *, latitude=12, longitude=17
             nc.createVariable(name, 'f8', ('N_PROF', 'N_LEVELS'), fill_value=99999)[:] = [values]
             flags = ['4','4','4'] if bad_pressure and name == 'PRES' else ['1','4','2']
             nc.createVariable(name+'_QC', 'S1', ('N_PROF', 'N_LEVELS'))[:] = np.array([flags], dtype='S1')
+        for name, values in (extra or {}).items():   # e.g. {'PSAL': [35, 35.1, 35.2]}; 99999 is the fill value
+            nc.createVariable(name, 'f8', ('N_PROF', 'N_LEVELS'), fill_value=99999)[:] = [values]
+            nc.createVariable(name+'_QC', 'S1', ('N_PROF', 'N_LEVELS'))[:] = np.array([['1','1','1']], dtype='S1')
 
 
 class EtlTests(unittest.TestCase):

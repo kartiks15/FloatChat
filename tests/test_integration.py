@@ -202,6 +202,22 @@ class PostgresIntegrationTests(unittest.TestCase):
         counts = analysis.run_analysis(measure='profiles', stat='count', group_by='year')
         self.assertEqual([(p['x'], p['y']) for p in counts['series'][0]['points']], [(2024, 1)])
 
+    def test_histogram_scatter_and_map(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for cycle, lat, lon, day, temp in EQUATOR_FIXTURES:
+                path = Path(folder) / f'D2902115_{cycle:03d}.nc'
+                make_fixture(path, temp, latitude=lat, longitude=lon, juld=juld(day), cycle=cycle,
+                             extra={'PSAL': [35.0, 35.1, 35.2]})
+                self.assertIsNone(etl.process_file(self.conn, path)['error'])
+            self.assertTrue(etl.refresh_summary(self.conn))
+        hist = analysis.run_analysis(region='equator', chart='histogram', bins=5)
+        self.assertEqual((sum(p['y'] for p in hist['points']), hist['chart']), (4, 'histogram'))
+        scatter = analysis.run_analysis(region='equator', chart='scatter', measure='temp', x_measure='psal')
+        self.assertEqual(len(scatter['points']), 8)                      # 4 profiles x 2 kept levels
+        self.assertEqual({p['x'] for p in scatter['points']}, {35.0, 35.2})
+        points = analysis.run_analysis(region='equator', chart='map')['points']
+        self.assertEqual(sorted(p['value'] for p in points), [25, 26, 27, 28])
+
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()
         try:

@@ -7,6 +7,7 @@ other value is a bound parameter.
 import re
 from typing import Literal
 
+import numpy
 from pydantic import Field, model_validator
 
 from database import QueryLimitError, fetch_rows
@@ -56,6 +57,8 @@ STAT_SQL = {
     "count": "COUNT(*)",
 }
 TOO_MANY = "too_many"
+MAX_ROWS = 5000          # histogram values, scatter levels, map profiles
+SAMPLE_PROFILES = 300    # scatter draws its levels from this many random matching profiles
 
 Measurement = Literal["temp", "psal", "doxy", "chla", "nitrate", "bbp700"]
 
@@ -189,6 +192,73 @@ def _grouped_series(req, name, f, extra_conditions, extra_params):
             "first_date": _day(totals["first_date"]), "last_date": _day(totals["last_date"])}
 
 
+def _layer_where(req, f, column):
+    conditions, params = region_conditions(f)
+    return (f"{column} IS NOT NULL AND pres >= %s AND pres <= %s AND " + " AND ".join(conditions),
+            list(req.layer()) + params)
+
+
+def _histogram(req, f):
+    """Counts of per-profile layer means in `bins` equal bins."""
+    column = MEASURES[req.measure][0]
+    where, params = _layer_where(req, f, column)
+    rows = fetch_rows(f"""SELECT profile_id, wmo_id, AVG({column}) AS v FROM observations WHERE {where}
+        GROUP BY profile_id, wmo_id""", params, max_rows=MAX_ROWS)
+    if not rows:
+        return [], 0, 0, []
+    counts, edges = numpy.histogram([row["v"] for row in rows], bins=req.bins)
+    points = [{"x": float((edges[i] + edges[i + 1]) / 2), "x0": float(edges[i]), "x1": float(edges[i + 1]),
+               "y": int(count)} for i, count in enumerate(counts)]
+    return points, len(rows), len({row["wmo_id"] for row in rows}), []
+
+
+def _scatter(req, f):
+    """Paired levels from a random sample of matching profiles."""
+    conditions, params = region_conditions(f)
+    sample = fetch_rows(f"""SELECT profile_id FROM profile_summary WHERE {" AND ".join(conditions)}
+        ORDER BY random() LIMIT %s""", params + [SAMPLE_PROFILES], max_rows=SAMPLE_PROFILES)
+    if not sample:
+        return [], 0, 0, []
+    x_column, y_column = MEASURES[req.x_measure][0], MEASURES[req.measure][0]
+    rows = fetch_rows(f"""SELECT profile_id, wmo_id, {x_column} AS x, {y_column} AS y, pres FROM observations
+        WHERE profile_id = ANY(%s) AND {x_column} IS NOT NULL AND {y_column} IS NOT NULL
+        AND pres >= %s AND pres <= %s LIMIT %s""",
+        [[row["profile_id"] for row in sample], *req.layer(), MAX_ROWS], max_rows=MAX_ROWS)
+    points = [{"x": row["x"], "y": row["y"], "pres": row["pres"]} for row in rows]
+    note = [f"A random sample of up to {SAMPLE_PROFILES} profiles ({MAX_ROWS:,} levels) is shown."]
+    return points, len({row["profile_id"] for row in rows}), len({row["wmo_id"] for row in rows}), note
+
+
+def _map(req, f):
+    """Each profile's layer mean at its position, newest first."""
+    column = MEASURES[req.measure][0]
+    where, params = _layer_where(req, f, column)
+    rows = fetch_rows(f"""SELECT profile_id, wmo_id, MIN(latitude) AS lat, MIN(longitude) AS lon,
+        AVG({column}) AS value, MIN(date_utc) AS date FROM observations WHERE {where}
+        GROUP BY profile_id, wmo_id ORDER BY date DESC LIMIT %s""", params + [MAX_ROWS], max_rows=MAX_ROWS)
+    points = [{"lat": row["lat"], "lon": row["lon"], "value": row["value"], "profile_id": row["profile_id"],
+               "wmo_id": row["wmo_id"]} for row in rows]
+    note = [f"Only the latest {MAX_ROWS:,} profiles are mapped."] if len(rows) == MAX_ROWS else []
+    return points, len(rows), len({row["wmo_id"] for row in rows}), note
+
+
+POINT_CHARTS = {"histogram": _histogram, "scatter": _scatter, "map": _map}
+
+
+def _title(req, specs, base):
+    label = MEASURES[req.measure][1]
+    chart, group = req.resolved_chart(), req.effective_group_by()
+    if chart == "histogram":
+        title = f"Distribution of profile-mean {label.lower()}"
+    elif chart == "scatter":
+        title = f"{label} vs {MEASURES[req.x_measure][1].lower()}"
+    elif chart == "map":
+        title = f"{label} by location"
+    else:
+        title = f"{STAT_LABELS[req.stat]} {label.lower()}" + (f" by {GROUP_LABELS[group]}" if group != "none" else "")
+    return title + " · " + (" vs ".join(name for name, *_ in specs) if req.compare_by != "none" else describe_filter(base))
+
+
 def run_analysis(**request):
     """Validate, compile and run one analysis; never raises for too much or too little data."""
     req = AnalysisRequest(**request)
@@ -196,28 +266,34 @@ def run_analysis(**request):
     group = req.effective_group_by()
     base = RegionFilter(**filter_dict(req))
     specs = _series_filters(req)
-    title = f"{STAT_LABELS[req.stat]} {label.lower()}" + (f" by {GROUP_LABELS[group]}" if group != "none" else "")
-    title += " · " + (" vs ".join(name for name, *_ in specs) if req.compare_by != "none" else describe_filter(base))
-    result = {"status": "ok", "title": title, "measure": req.measure, "measure_label": label, "units": units,
+    result = {"status": "ok", "title": _title(req, specs, base), "measure": req.measure, "measure_label": label, "units": units,
               "stat": req.stat, "group_by": group, "chart": req.resolved_chart(), "pressure_range": list(req.layer()),
               "depth_bin": req.depth_bin, "x_measure": req.x_measure, "bins": req.bins, "series": [], "points": [],
-              "diagnosis": None, "coverage": None, "notes": [], "n_profiles": 0,
+              "diagnosis": None, "coverage": None, "notes": [], "n_profiles": 0, "n_floats": 0,
               "filter": None if req.compare_by in ("region", "float") else filter_dict(base),
               "filter_label": describe_filter(base),
               "dashboard": "The dashboard charts this result and highlights the matching profiles on the map."}
-    try:
-        result["series"] = [_grouped_series(req, *spec) for spec in specs]
-    except QueryLimitError:
-        result["status"] = TOO_MANY
-        return result
-    points = [point for series in result["series"] for point in series["points"]]
-    result["n_profiles"] = sum(series["n_profiles"] for series in result["series"])
     if any(f.region and REGIONS[f.region]["approximate"] for _, f, *_ in specs):
         result["notes"].append("Region boxes are approximate.")
-    if any(point["low"] for point in points):
-        result["notes"].append("Points from fewer than 3 profiles are faded (low confidence).")
+    try:
+        if result["chart"] in POINT_CHARTS:   # never compared (validated), so one filter
+            points, result["n_profiles"], result["n_floats"], notes = POINT_CHARTS[result["chart"]](req, base)
+            result["points"] = points
+            result["notes"] += notes
+            low = 0 < result["n_profiles"] < LOW_PROFILES
+        else:
+            result["series"] = [_grouped_series(req, *spec) for spec in specs]
+            points = [point for series in result["series"] for point in series["points"]]
+            result["n_profiles"] = sum(series["n_profiles"] for series in result["series"])
+            result["n_floats"] = max((series["n_floats"] for series in result["series"]), default=0)
+            low = bool(points) and all(point["low"] for point in points)
+            if any(point["low"] for point in points):
+                result["notes"].append("Points from fewer than 3 profiles are faded (low confidence).")
+    except QueryLimitError:
+        result.update(status=TOO_MANY, series=[], points=[])
+        return result
     if not points:
         result["status"] = "no_data"
-    elif all(point["low"] for point in points):
+    elif low:
         result["status"] = "low_data"
     return result
