@@ -1,7 +1,9 @@
 import re
 import unittest
+from unittest.mock import patch
 
-from analysis import AnalysisRequest
+from analysis import AnalysisRequest, run_analysis
+from database import QueryLimitError
 
 
 class AnalysisRequestTests(unittest.TestCase):
@@ -38,6 +40,27 @@ class AnalysisRequestTests(unittest.TestCase):
         self.assertEqual(AnalysisRequest(pres_min=100).layer(), (100, 110))
         self.assertEqual(AnalysisRequest(compare_by='year', compare_values=['2024'],
                                          group_by='month_of_year').compare_values, [2024])
+
+
+class RunAnalysisTests(unittest.TestCase):
+    def test_sql_is_fixed_fragments_with_bound_values(self):
+        with patch('analysis.fetch_rows', side_effect=[[{'x': 3, 'y': 28.0, 'n_profiles': 4, 'n_floats': 1}],
+                                                       [{'n_profiles': 4, 'n_floats': 1, 'first_date': None, 'last_date': None}]]) as fetch:
+            result = run_analysis(measure='doxy', stat='median', group_by='lat_band', band_deg=2.5,
+                                  region='equator', months=[3, 4], wmo_id='2902115')
+        sql, params = fetch.call_args_list[0].args
+        self.assertIn('percentile_cont(0.5) WITHIN GROUP (ORDER BY v)', sql)
+        self.assertIn('FLOOR(latitude / %s) * %s', sql)
+        for value in ('2902115', '2.5', 'equator'):
+            self.assertNotIn(value, sql)
+        self.assertEqual(params[:4], [2.5, 2.5, 0, 10])
+        self.assertEqual((result['status'], result['chart'], result['title']),
+                         ('ok', 'bar', 'Median oxygen by latitude band · 5°S–5°N · Mar–Apr · WMO 2902115'))
+
+    def test_too_many_points_becomes_a_status(self):
+        with patch('analysis.fetch_rows', side_effect=QueryLimitError('Result exceeds 1000 rows')):
+            result = run_analysis(group_by='day')
+        self.assertEqual((result['status'], result['series']), ('too_many', []))
 
 
 if __name__ == '__main__':

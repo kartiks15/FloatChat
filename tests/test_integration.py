@@ -11,6 +11,7 @@ from unittest.mock import patch
 import psycopg2
 from psycopg2.extensions import parse_dsn
 
+import analysis
 import argo_etl as etl
 import database
 import ocean_tools
@@ -166,6 +167,40 @@ class PostgresIntegrationTests(unittest.TestCase):
                     cur.execute('SELECT data_mode, source_file FROM profiles')
                     self.assertEqual(cur.fetchone(), expected)
                 self.conn.commit()
+
+    def test_analysis_mean_by_calendar_month_across_years(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder)
+        result = analysis.run_analysis(region='equator', months=[3, 4, 5, 6], group_by='month_of_year')
+        points = result['series'][0]['points']
+        self.assertEqual([(p['x'], p['y'], p['n_profiles']) for p in points], [(3, 28, 1), (4, 26, 1), (5, 27, 1)])
+        self.assertEqual((result['series'][0]['first_date'], result['series'][0]['last_date']), ('2023-05-10', '2024-04-15'))
+
+    def test_max_is_the_raw_maximum_and_median_uses_profile_means(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder)
+        top = analysis.run_analysis(region='equator', stat='max', group_by='none', pres_max=2000)
+        self.assertEqual(top['series'][0]['points'][0]['y'], 30)          # profile A at 30 dbar, not a mean
+        middle = analysis.run_analysis(region='equator', months=[3, 4, 5, 6], stat='median', group_by='none')
+        self.assertEqual(middle['series'][0]['points'][0]['y'], 27)       # median of 28, 26, 27
+
+    def test_compare_regions_marks_low_confidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder)
+        result = analysis.run_analysis(compare_by='region', compare_values=['equator', 'arabian_sea'], group_by='none')
+        (eq,), (ar,) = [s['points'] for s in result['series']]
+        self.assertEqual((eq['y'], eq['low'], ar['y'], ar['low']), (26.5, False, 30, True))
+        self.assertIsNone(result['filter'])
+        self.assertEqual(result['title'], 'Mean temperature · Equator vs Arabian Sea')
+
+    def test_profile_counts_and_grids_counted_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder, EQUATOR_FIXTURES[:1])
+            load_fixtures(self.conn, folder, EQUATOR_FIXTURES[:1], prefix='BD')
+        mean = analysis.run_analysis(region='equator', group_by='none')
+        self.assertEqual(mean['series'][0]['points'][0]['n_profiles'], 1)
+        counts = analysis.run_analysis(measure='profiles', stat='count', group_by='year')
+        self.assertEqual([(p['x'], p['y']) for p in counts['series'][0]['points']], [(2024, 1)])
 
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()
