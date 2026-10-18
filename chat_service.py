@@ -196,9 +196,9 @@ def dashboard_actions(plan, result):
         first = result["rows"][0]
         actions["select"] = {"profile_id": first["profile_id"], "wmo_id": first["wmo_id"]}
     elif plan.tool in ("region_profiles", "aggregate_measurements"):
-        if result.get("n_profiles"):
-            label = result["label"] if plan.tool == "region_profiles" else result["filter_label"]
-            actions["highlight"] = {"filter": result["filter"], "label": label}
+        # No matches clears any earlier region's highlight instead of leaving it beside this result.
+        label = result.get("label") if plan.tool == "region_profiles" else result.get("filter_label")
+        actions["highlight"] = {"filter": result["filter"], "label": label} if result.get("n_profiles") else None
         if plan.tool == "aggregate_measurements":
             actions["chart"] = result
     return actions or None

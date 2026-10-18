@@ -142,12 +142,13 @@ class ChatTests(unittest.TestCase):
                          {'select': {'profile_id': 7, 'wmo_id': '1'}})
         self.assertIsNone(chat.dashboard_actions(plan('dataset_summary'), {'floats': 2}))
 
-    def test_actions_skip_empty_highlight(self):
+    def test_empty_region_result_clears_the_old_highlight(self):
+        # A stale highlight of an earlier region next to "no measurements" would mislead.
         plan = chat.ToolPlan(tool='aggregate_measurements', arguments={})
         empty = {'n_profiles': 0, 'filter': {}, 'filter_label': 'All profiles', 'rows': []}
-        self.assertEqual(chat.dashboard_actions(plan, empty), {'chart': empty})
-        self.assertIsNone(chat.dashboard_actions(chat.ToolPlan(tool='region_profiles', arguments={}),
-                                                 {'n_profiles': 0, 'filter': {}, 'label': 'x'}))
+        self.assertEqual(chat.dashboard_actions(plan, empty), {'chart': empty, 'highlight': None})
+        self.assertEqual(chat.dashboard_actions(chat.ToolPlan(tool='region_profiles', arguments={}),
+                                                {'n_profiles': 0, 'filter': {}, 'label': 'x'}), {'highlight': None})
 
     def test_prompts_describe_regions_and_dashboard(self):
         with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \

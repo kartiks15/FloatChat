@@ -187,6 +187,12 @@ class DashboardTests(unittest.TestCase):
         aggregate.assert_called_once_with(region='equator', months=[3, 4, 5, 6], variable='temp', group_by='month_of_year')
         self.assertEqual((chart, highlight['label'], feedback), (spec, '5°S–5°N', ''))
 
+    def test_region_chart_with_no_matches_clears_highlight(self):
+        empty = {'n_profiles': 0, 'filter': {'region': 'bay_of_bengal'}, 'filter_label': 'x', 'rows': []}
+        with patch('app.aggregate_measurements', return_value=empty):
+            chart, highlight, _ = app.region_chart(1, 'bay_of_bengal', [1], 'temp', 'month')
+        self.assertEqual((chart, highlight), (empty, None))
+
     def test_region_chart_reports_errors_without_details(self):
         with patch('app.aggregate_measurements', side_effect=QueryLimitError('Result exceeds 1000 rows')):
             self.assertEqual(app.region_chart(1, 'equator', [], 'temp', 'week')[:2], (no_update, no_update))

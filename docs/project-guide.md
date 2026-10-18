@@ -562,7 +562,8 @@ that goes into the model's first prompt.
    dates; core/BGC grids are not separate profiles.
 9. **Dashboard actions.** `dashboard_actions(plan, result)` returns any of `select`
    (`profile_data`, or the first row of `search_profiles`/`trajectory`), `highlight`
-   (`region_profiles` and `aggregate_measurements`, only when something matched) and `chart`
+   (`region_profiles` and `aggregate_measurements`; `None` when nothing matched, which clears an
+   earlier region's highlight) and `chart`
    (`aggregate_measurements`, even when empty). `answer_question` returns
    `(answer, actions)`.
 10. **Errors.** Quota and provider messages (bad key, no credits, rate limited) are shown
