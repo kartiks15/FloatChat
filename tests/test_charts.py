@@ -46,7 +46,7 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(sc.data[0].mode, 'markers')
         mp = charts.build_chart(dict(BASE, chart='map', series=[],
                                      points=[dict(lat=0, lon=80, value=28, profile_id=1, wmo_id='1')]))
-        self.assertEqual(mp.data[0].type, 'scattermap')
+        self.assertEqual(mp.data[0].type, 'scattergeo')   # no tile style to load, unlike scattermap
 
     def test_messages_instead_of_charts(self):
         no_data = dict(BASE, status='no_data', series=[],

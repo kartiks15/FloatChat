@@ -163,7 +163,7 @@ class DashboardTests(unittest.TestCase):
                       n_profiles=1, n_floats=1, group_by='none', depth_bin=50, x_measure=None)
         chart_fig, map_fig, *_, chart_hidden, map_hidden, panel_hidden = app.render_analysis(result)
         self.assertIs(chart_fig, no_update)
-        self.assertEqual(map_fig.data[0].type, 'scattermap')
+        self.assertEqual(map_fig.data[0].type, 'scattergeo')
         self.assertEqual((chart_hidden, map_hidden, panel_hidden), (True, False, False))
         histogram = dict(result, chart='histogram', points=[dict(x=200, x0=190, x1=210, y=1)])
         chart_fig, map_fig, *_, chart_hidden, map_hidden, _ = app.render_analysis(histogram)

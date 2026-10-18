@@ -3,6 +3,7 @@ import plotly.graph_objects as go
 
 FONT = "Geist, system-ui, -apple-system, 'Segoe UI', sans-serif"
 MONO = "'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace"
+SURFACE = "#18181b"          # panel surface (the dataviz checks run against this)
 SURFACE_2 = "#232327"
 BORDER = "#2e2e33"
 GRID = "#26262b"

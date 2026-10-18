@@ -3,7 +3,8 @@ import plotly.graph_objects as go
 
 from analysis import MEASURES, STAT_LABELS
 from regions import MONTH_NAMES
-from theme import ACCENT, AXIS, BASE_LAYOUT, COLORS, INK_2, PRESSURE_SCALE, SERIES_COLORS, placeholder_figure, plural
+from theme import (ACCENT, AXIS, BASE_LAYOUT, BORDER, COLORS, INK_2, PRESSURE_SCALE, SERIES_COLORS, SURFACE,
+                   SURFACE_2, placeholder_figure, plural)
 
 MESSAGE_STATUSES = ("no_data", "too_many", "unsupported")
 TOO_MANY_MESSAGE = "Too many points to chart. Choose a coarser grouping or a shorter period."
@@ -105,16 +106,20 @@ def _scatter(result):
 
 
 def _map(result):
+    """Profiles coloured by value. A geo chart draws its own coastlines: no tile style to load, so
+    updates can't be lost the way they are when a MapLibre map is still fetching its style."""
     points = result["points"]
-    lats, lons = [p["lat"] for p in points], [p["lon"] for p in points]
-    fig = go.Figure(go.Scattermap(
-        lat=lats, lon=lons, mode="markers", customdata=[[p["profile_id"], p["wmo_id"]] for p in points],
-        marker=dict(size=8, color=[p["value"] for p in points], colorscale=PRESSURE_SCALE,
+    fig = go.Figure(go.Scattergeo(
+        lat=[p["lat"] for p in points], lon=[p["lon"] for p in points], mode="markers",
+        customdata=[[p["profile_id"], p["wmo_id"]] for p in points],
+        marker=dict(size=6, color=[p["value"] for p in points], colorscale=PRESSURE_SCALE, line=dict(width=0),
                     colorbar=dict(title=dict(text=result["units"], font=dict(color=INK_2, size=11)), thickness=8,
                                   len=0.8, outlinewidth=0)),
         hovertemplate=f"WMO %{{customdata[1]}}<br>%{{marker.color:.3g}} {result['units']}<extra></extra>"))
-    center = dict(lat=sum(lats) / len(lats), lon=sum(lons) / len(lons)) if points else dict(lat=0, lon=75)
-    fig.update_layout(map=dict(style="carto-darkmatter", center=center, zoom=2))
+    fig.update_geos(projection_type="natural earth", fitbounds="locations", bgcolor="rgba(0,0,0,0)",
+                    showland=True, landcolor=SURFACE_2, showocean=True, oceancolor=SURFACE,
+                    showcoastlines=True, coastlinecolor=BORDER, showcountries=False, showframe=False,
+                    showlakes=False)
     return fig
 
 
