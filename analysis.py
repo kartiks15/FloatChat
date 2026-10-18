@@ -218,11 +218,14 @@ def _histogram(req, f):
 def _scatter(req, f):
     """Paired levels from a random sample of matching profiles."""
     conditions, params = region_conditions(f)
-    sample = fetch_rows(f"""SELECT profile_id FROM profile_summary WHERE {" AND ".join(conditions)}
-        ORDER BY random() LIMIT %s""", params + [SAMPLE_PROFILES], max_rows=SAMPLE_PROFILES)
+    x_column, y_column = MEASURES[req.x_measure][0], MEASURES[req.measure][0]
+    # Sample only profiles measuring both, so sparse measurements (nitrate) don't waste the sample.
+    sample = fetch_rows(f"""SELECT profile_id FROM profile_summary s WHERE {" AND ".join(conditions)}
+        AND EXISTS (SELECT 1 FROM observations o WHERE o.profile_id = s.profile_id
+                    AND o.{x_column} IS NOT NULL AND o.{y_column} IS NOT NULL AND o.pres >= %s AND o.pres <= %s)
+        ORDER BY random() LIMIT %s""", params + [*req.layer(), SAMPLE_PROFILES], max_rows=SAMPLE_PROFILES)
     if not sample:
         return [], 0, 0, []
-    x_column, y_column = MEASURES[req.x_measure][0], MEASURES[req.measure][0]
     # Each sampled profile gets an equal share of the level cap, at random depths, so a few dense
     # profiles can't fill the chart on their own.
     per_profile = max(1, MAX_ROWS // len(sample))

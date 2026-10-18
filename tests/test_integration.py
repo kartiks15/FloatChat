@@ -244,6 +244,20 @@ class PostgresIntegrationTests(unittest.TestCase):
             result = analysis.run_analysis(region='equator', chart='scatter', measure='temp', x_measure='psal')
         self.assertEqual((len(result['points']), result['n_profiles']), (4, 4))
 
+    def test_scatter_samples_only_profiles_that_have_both_measurements(self):
+        # One of four equator profiles has salinity; a one-profile sample must always pick it.
+        with tempfile.TemporaryDirectory() as folder:
+            for cycle, lat, lon, day, temp in EQUATOR_FIXTURES:
+                path = Path(folder) / f'D2902115_{cycle:03d}.nc'
+                make_fixture(path, temp, latitude=lat, longitude=lon, juld=juld(day), cycle=cycle,
+                             extra={'PSAL': [35.0, 35.1, 35.2]} if cycle == 2 else None)
+                self.assertIsNone(etl.process_file(self.conn, path)['error'])
+            self.assertTrue(etl.refresh_summary(self.conn))
+        with patch('analysis.SAMPLE_PROFILES', 1):
+            results = [analysis.run_analysis(region='equator', chart='scatter', measure='temp', x_measure='psal')
+                       for _ in range(8)]
+        self.assertEqual([(r['n_profiles'], len(r['points'])) for r in results], [(1, 2)] * 8)   # 2 QC-good levels
+
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()
         try:
