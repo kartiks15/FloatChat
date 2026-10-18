@@ -5,13 +5,15 @@ statistics come from the dictionaries below, chosen by validated Literal values;
 other value is a bound parameter.
 """
 import re
+import time
+from functools import lru_cache
 from typing import Literal
 
 import numpy
 from pydantic import Field, model_validator
 
 from database import QueryLimitError, fetch_rows
-from regions import REGIONS, RegionFilter, describe_filter, filter_dict, region_conditions
+from regions import REGIONS, RegionFilter, describe_filter, filter_dict, region_conditions, region_phrase
 
 MEASURES = {  # key -> (column, label, units)
     "temp": ("temp", "Temperature", "°C"),
@@ -244,6 +246,103 @@ def _map(req, f):
 
 POINT_CHARTS = {"histogram": _histogram, "scatter": _scatter, "map": _map}
 
+SUPPORTED_SUMMARY = ("I can chart temperature, salinity, oxygen, chlorophyll-a, nitrate, backscatter or profile counts, "
+                     "as a mean, median, minimum, maximum, standard deviation, count or 10th/90th percentile, by day, "
+                     "week, month, year, calendar month, depth, float or latitude/longitude band, for named regions "
+                     "(including approximate ocean boxes) or a latitude/longitude box, and compare up to four "
+                     "regions, floats or years.")
+
+
+def _plural(count, noun):
+    return f"{count:,} {noun}{'' if count == 1 else 's'}"
+
+
+def _coord(value, positive, negative):
+    return "0.0°" if value == 0 else f"{abs(value):.1f}°{positive if value > 0 else negative}"
+
+
+@lru_cache(maxsize=1)
+def _coverage(bucket):
+    """What the database holds; `bucket` changes every 10 minutes, which refreshes the cache."""
+    row = fetch_rows("""SELECT COUNT(DISTINCT wmo_id) AS floats, COUNT(*) AS profiles, MIN(date_utc) AS first_date,
+        MAX(date_utc) AS last_date, MIN(latitude) AS lat_min, MAX(latitude) AS lat_max,
+        MIN(longitude) AS lon_min, MAX(longitude) AS lon_max FROM profile_summary""")[0]
+    columns = [key for key, (column, *_) in MEASURES.items() if column]
+    counts = fetch_rows("SELECT " + ", ".join(f"COUNT({MEASURES[key][0]}) AS {key}" for key in columns)
+                        + " FROM observations")[0]
+    area = None
+    if row["profiles"]:
+        lat = (row["lat_min"] + row["lat_max"]) / 2
+        lon = (row["lon_min"] + row["lon_max"]) / 2
+        for box in REGIONS.values():
+            inside_lon = (box["lon_min"] <= lon <= box["lon_max"] if box["lon_min"] <= box["lon_max"]
+                          else lon >= box["lon_min"] or lon <= box["lon_max"])
+            if box["approximate"] and box["lat_min"] <= lat <= box["lat_max"] and inside_lon:
+                area = box["label"]
+                break
+    return {"floats": row["floats"], "profiles": row["profiles"], "first_date": _day(row["first_date"]),
+            "last_date": _day(row["last_date"]), "lat": [row["lat_min"], row["lat_max"]],
+            "lon": [row["lon_min"], row["lon_max"]], "measures": dict(counts), "area": area}
+
+
+def data_coverage():
+    return dict(_coverage(int(time.time() // 600)))
+
+
+def coverage_sentence(cov):
+    if not cov.get("profiles"):
+        return "The database has no profiles yet."
+    (lat0, lat1), (lon0, lon1) = cov["lat"], cov["lon"]
+    box = f"{_coord(lat0, 'N', 'S')}–{_coord(lat1, 'N', 'S')}, {_coord(lon0, 'E', 'W')}–{_coord(lon1, 'E', 'W')}"
+    where = f" in the {cov['area']} area ({box})" if cov.get("area") else f" ({box})"
+    return f"This database has {_plural(cov['floats'], 'float')}{where}, {cov['first_date']} to {cov['last_date']}."
+
+
+def _profile_count(f):
+    conditions, params = region_conditions(f)
+    return fetch_rows(f"SELECT COUNT(*) AS n FROM profile_summary WHERE {' AND '.join(conditions)}", params)[0]["n"]
+
+
+def _has_values(column, f, layer=None):
+    conditions, params = region_conditions(f)
+    if layer:
+        conditions, params = ["pres >= %s AND pres <= %s"] + conditions, list(layer) + params
+    return fetch_rows(f"SELECT EXISTS (SELECT 1 FROM observations WHERE {column} IS NOT NULL AND "
+                      f"{' AND '.join(conditions)}) AS found", params)[0]["found"]
+
+
+def diagnose_empty(req, f):
+    """Name the first filter that leaves nothing: area, float, dates, months, then the measurement."""
+    phrase = region_phrase(f)
+    subject = phrase[0].upper() + phrase[1:]
+    current = RegionFilter(region=f.region, lat_min=f.lat_min, lat_max=f.lat_max, lon_min=f.lon_min, lon_max=f.lon_max)
+    if not _profile_count(current):
+        return f"No profiles in {phrase} at all."
+    if f.wmo_id:
+        current = current.model_copy(update={"wmo_id": f.wmo_id})
+        if not _profile_count(current):
+            return f"Float {f.wmo_id} has no profiles in {phrase}."
+    if f.start_date or f.end_date:
+        found = _profile_count(current)
+        current = current.model_copy(update={"start_date": f.start_date, "end_date": f.end_date})
+        if not _profile_count(current):
+            span = (f"between {f.start_date} and {f.end_date}" if f.start_date and f.end_date
+                    else f"from {f.start_date}" if f.start_date else f"until {f.end_date}")
+            return f"{subject} has {found:,} profiles, but none {span}."
+    if f.months:
+        found = _profile_count(current)
+        current = current.model_copy(update={"months": f.months})
+        if not _profile_count(current):
+            return f"{subject} has {found:,} profiles, but none in {describe_filter(RegionFilter(months=f.months))}."
+    if req.measure != "profiles":
+        column, label, _ = MEASURES[req.measure]
+        if not _has_values(column, current):
+            return f"These profiles have no {label.lower()} measurements."
+        if not _has_values(column, current, req.layer()):
+            lo, hi = req.layer()
+            return f"These profiles have {label.lower()} measurements, but none between {lo:g} and {hi:g} dbar."
+    return "No measurements match this request."
+
 
 def _title(req, specs, base):
     label = MEASURES[req.measure][1]
@@ -294,6 +393,13 @@ def run_analysis(**request):
         return result
     if not points:
         result["status"] = "no_data"
+        result["coverage"] = data_coverage()
+        sentences = []
+        for _, f, *_ in specs:
+            sentence = diagnose_empty(req, f)
+            if sentence not in sentences:
+                sentences.append(sentence)
+        result["diagnosis"] = " ".join(sentences + [coverage_sentence(result["coverage"])])
     elif low:
         result["status"] = "low_data"
     return result

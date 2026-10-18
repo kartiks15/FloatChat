@@ -57,6 +57,7 @@ class PostgresIntegrationTests(unittest.TestCase):
         cls.conn.close()
 
     def setUp(self):
+        analysis._coverage.cache_clear()
         with self.conn.cursor() as cur:
             cur.execute('TRUNCATE observations, profiles, floats RESTART IDENTITY CASCADE')
         self.conn.commit()
@@ -217,6 +218,35 @@ class PostgresIntegrationTests(unittest.TestCase):
         self.assertEqual({p['x'] for p in scatter['points']}, {35.0, 35.2})
         points = analysis.run_analysis(region='equator', chart='map')['points']
         self.assertEqual(sorted(p['value'] for p in points), [25, 26, 27, 28])
+
+    def test_pacific_has_no_data_and_says_why(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder)
+        result = analysis.run_analysis(region='pacific_ocean')
+        self.assertEqual(result['status'], 'no_data')
+        self.assertTrue(result['diagnosis'].startswith(
+            'No profiles in the Pacific Ocean (approximate box) at all. This database has 1 float'))
+
+    def test_dates_and_months_diagnoses(self):
+        with tempfile.TemporaryDirectory() as folder:
+            load_fixtures(self.conn, folder)
+        dated = analysis.run_analysis(region='equator', start_date='2010-01-01', end_date='2010-12-31')
+        self.assertIn('The equatorial band (5°S–5°N) has 4 profiles, but none between 2010-01-01 and 2010-12-31.',
+                      dated['diagnosis'])
+        self.assertIn('but none in Sep.', analysis.run_analysis(region='equator', months=[9])['diagnosis'])
+        self.assertIn('Float 1234567 has no profiles in',
+                      analysis.run_analysis(region='equator', wmo_id='1234567')['diagnosis'])
+
+    def test_measured_only_deeper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'D2902115_001.nc'
+            make_fixture(path, latitude=0, longitude=80, juld=juld('2024-03-15'), extra={'DOXY': [99999, 200, 210]})
+            self.assertIsNone(etl.process_file(self.conn, path)['error'])
+            self.assertTrue(etl.refresh_summary(self.conn))
+        result = analysis.run_analysis(region='equator', measure='doxy')
+        self.assertIn('These profiles have oxygen measurements, but none between 0 and 10 dbar.', result['diagnosis'])
+        nitrate = analysis.run_analysis(region='equator', measure='nitrate')
+        self.assertIn('These profiles have no nitrate measurements.', nitrate['diagnosis'])
 
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()

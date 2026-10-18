@@ -2,7 +2,7 @@ import re
 import unittest
 from unittest.mock import patch
 
-from analysis import AnalysisRequest, run_analysis
+from analysis import AnalysisRequest, coverage_sentence, run_analysis
 from database import QueryLimitError
 
 
@@ -56,6 +56,13 @@ class RunAnalysisTests(unittest.TestCase):
         self.assertEqual(params[:4], [2.5, 2.5, 0, 10])
         self.assertEqual((result['status'], result['chart'], result['title']),
                          ('ok', 'bar', 'Median oxygen by latitude band · 5°S–5°N · Mar–Apr · WMO 2902115'))
+
+    def test_coverage_sentence(self):
+        cov = dict(floats=20, profiles=3330, first_date='2013-11-24', last_date='2026-10-18',
+                   lat=[-55.71447, 22.4463], lon=[11.129, 137.2407], measures={}, area='Indian Ocean')
+        self.assertEqual(coverage_sentence(cov), 'This database has 20 floats in the Indian Ocean area '
+                         '(55.7°S–22.4°N, 11.1°E–137.2°E), 2013-11-24 to 2026-10-18.')
+        self.assertEqual(coverage_sentence(dict(cov, profiles=0)), 'The database has no profiles yet.')
 
     def test_too_many_points_becomes_a_status(self):
         with patch('analysis.fetch_rows', side_effect=QueryLimitError('Result exceeds 1000 rows')):
