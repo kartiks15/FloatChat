@@ -195,12 +195,16 @@ def dashboard_actions(plan, result):
     elif plan.tool in ("search_profiles", "trajectory") and result.get("rows"):
         first = result["rows"][0]
         actions["select"] = {"profile_id": first["profile_id"], "wmo_id": first["wmo_id"]}
-    elif plan.tool in ("region_profiles", "aggregate_measurements"):
+    elif plan.tool == "region_profiles":
         # No matches clears any earlier region's highlight instead of leaving it beside this result.
-        label = result.get("label") if plan.tool == "region_profiles" else result.get("filter_label")
-        actions["highlight"] = {"filter": result["filter"], "label": label} if result.get("n_profiles") else None
-        if plan.tool == "aggregate_measurements":
-            actions["chart"] = result
+        actions["highlight"] = ({"filter": result["filter"], "label": result["label"]}
+                                if result.get("n_profiles") else None)
+    elif plan.tool == "analyze":
+        actions["chart"] = result
+        actions["highlight"] = ({"filter": result["filter"], "label": result["filter_label"]}
+                                if result.get("filter") is not None and result.get("n_profiles") else None)
+    elif plan.tool == "unsupported":
+        actions["chart"] = result
     return actions or None
 
 
@@ -227,7 +231,7 @@ def answer_question(query, history=None, client_id="local", api_key=None, model=
             "For INCOIS use DAC code IN. Dates are UTC. "
             "Named areas: use region (equator = 5°S–5°N, arabian_sea, bay_of_bengal) or explicit "
             "lat_min/lat_max/lon_min/lon_max. For months without a year, such as 'March to June', use months "
-            "[3,4,5,6] and, for aggregates, group_by month_of_year. Use aggregate_measurements for averages, "
+            "[3,4,5,6] and, for aggregates, group_by month_of_year. Use analyze for averages, "
             "trends or graphs, and region_profiles to find, count or highlight all floats in an area. "
             "Available operations: " + json.dumps(tool_catalog()),
             json.dumps({"today_utc": datetime.now(timezone.utc).date().isoformat(),

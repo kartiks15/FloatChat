@@ -125,6 +125,8 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .center-bottom { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; min-width: 0; max-width: 100%; }
 .analysis { width: min(620px, 100%); padding: 12px 14px 10px; border-radius: var(--radius); animation: rise 0.6s var(--ease) both; }
 .analysis-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.analysis-message { margin: 8px 0 4px; color: var(--ink-2); line-height: 1.5; }
+.analysis-message:empty { display: none; }
 
 .status-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .status-dot.is-live, .is-on .status-dot { background: var(--accent); }

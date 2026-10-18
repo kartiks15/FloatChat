@@ -10,9 +10,9 @@ class McpTests(unittest.TestCase):
         with patch('postgres_mcp.execute_tool', return_value={'n_profiles': 1}) as run:
             self.assertEqual(json.loads(postgres_mcp.find_region_profiles(region='equator', months=[3])), {'n_profiles': 1})
             run.assert_called_with('region_profiles', {'region': 'equator', 'months': [3]})
-            postgres_mcp.aggregate_measurements(region='equator')
+            postgres_mcp.analyze(region='pacific_ocean', stat='max')
             name, arguments = run.call_args.args
-        self.assertEqual((name, arguments['group_by'], arguments['region']), ('aggregate_measurements', 'month', 'equator'))
+        self.assertEqual((name, arguments['stat'], arguments['region']), ('analyze', 'max', 'pacific_ocean'))
         self.assertNotIn('pres_max', arguments)
 
 

@@ -130,32 +130,6 @@ class PostgresIntegrationTests(unittest.TestCase):
         result = ocean_tools.region_profiles(lat_min=-5, lat_max=5, lon_min=170, lon_max=-170)
         self.assertEqual(result['n_profiles'], 1)
 
-    def test_aggregate_month_of_year_across_years(self):
-        with tempfile.TemporaryDirectory() as folder:
-            load_fixtures(self.conn, folder)
-        result = ocean_tools.aggregate_measurements(region='equator', months=[3, 4, 5, 6], group_by='month_of_year')
-        self.assertEqual([(r['bucket'], r['mean'], r['n_profiles']) for r in result['rows']], [(3, 28, 1), (4, 26, 1), (5, 27, 1)])
-        self.assertEqual((result['n_profiles'], result['first_date'], result['last_date']), (3, '2023-05-10', '2024-04-15'))
-
-    def test_aggregate_month_buckets_for_one_year(self):
-        with tempfile.TemporaryDirectory() as folder:
-            load_fixtures(self.conn, folder)
-        result = ocean_tools.aggregate_measurements(region='equator', start_date='2024-03-01', end_date='2024-06-30')
-        self.assertEqual([(r['bucket'], r['mean']) for r in result['rows']], [('2024-03', 28), ('2024-04', 26)])
-
-    def test_aggregate_pressure_profile_uses_per_profile_means(self):
-        with tempfile.TemporaryDirectory() as folder:
-            load_fixtures(self.conn, folder)
-        rows = ocean_tools.aggregate_measurements(region='equator', months=[3, 4, 5, 6], group_by='pressure')['rows']
-        self.assertEqual([(r['bucket'], r['mean'], r['n_profiles']) for r in rows], [(0, 28, 3)])   # (29 + 27 + 28) / 3
-
-    def test_aggregate_counts_core_and_bgc_grids_once(self):
-        with tempfile.TemporaryDirectory() as folder:
-            load_fixtures(self.conn, folder, EQUATOR_FIXTURES[:1])
-            load_fixtures(self.conn, folder, EQUATOR_FIXTURES[:1], prefix='BD')
-        result = ocean_tools.aggregate_measurements(region='equator')
-        self.assertEqual((result['n_profiles'], result['rows'][0]['n_profiles']), (1, 1))
-
     def test_reimport_upgrades_profile_data_mode_but_never_downgrades(self):
         with tempfile.TemporaryDirectory() as folder:
             real, delayed = Path(folder) / 'R2902115_001.nc', Path(folder) / 'D2902115_001.nc'

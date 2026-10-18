@@ -25,13 +25,15 @@ from flask import request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 from dotenv import load_dotenv
 
-from database import QueryLimitError, fetch_rows
+from database import fetch_rows
 from chat_service import (answer_question, ai_enabled, dashboard_actions, user_keys_allowed, openrouter_models,
                           MAX_QUERY_CHARS)
 from theme import (ACCENT, AXIS, BASE_LAYOUT, BORDER, COLORS, FONT, HIGHLIGHT, INK, INK_2, MONO, MUTED,  # noqa: F401
-                   PRESSURE_SCALE, PROFILE_DOT, SURFACE_2, placeholder_figure, plural, translucent)
-from ocean_tools import (MONTH_NAMES, REGIONS, VARIABLES, RegionFilter, ToolPlan, aggregate_measurements,
-                         describe_filter, filter_dict, region_points)
+                   PRESSURE_SCALE, PROFILE_DOT, SURFACE_2, placeholder_figure)
+from analysis import MEASURES, run_analysis
+from charts import build_chart, describe_result
+from ocean_tools import (MONTH_NAMES, REGIONS, RegionFilter, ToolPlan, describe_filter, filter_dict,  # noqa: F401
+                         region_points)
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -261,55 +263,6 @@ def build_ts_diagram(wmo_id=None):
     return fig
 
 
-def build_analysis_chart(spec):
-    """One series: the mean of per-profile means, with a ± one standard deviation band."""
-    rows = spec.get("rows") or []
-    if not rows:
-        return placeholder_figure("No measurements match this filter", height=160)
-    color = COLORS.get(spec["variable"], ACCENT)
-    lo, hi = spec["pressure_range"]
-    value_title = f"{spec['label']} ({spec['units']})"
-    hover = [f"{plural(r['n_profiles'], 'profile')} · {plural(r['n_floats'], 'float')}" for r in rows]
-    band = [r for r in rows if r.get("std") is not None]
-    fig = go.Figure()
-    if spec["group_by"] == "pressure":
-        half = spec.get("bin_dbar", 50) / 2
-        depth = [r["bucket"] + half for r in rows]
-        if len(band) > 1:
-            band_depth = [r["bucket"] + half for r in band]
-            fig.add_trace(go.Scatter(x=[r["mean"] + r["std"] for r in band], y=band_depth, mode="lines",
-                                     line=dict(width=0), hoverinfo="skip", showlegend=False))
-            fig.add_trace(go.Scatter(x=[r["mean"] - r["std"] for r in band], y=band_depth, mode="lines",
-                                     line=dict(width=0), fill="tonextx", fillcolor=translucent(color, 0.18),
-                                     hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(
-            x=[r["mean"] for r in rows], y=depth, name="Mean", mode="lines+markers" if len(rows) > 1 else "markers",
-            line=dict(color=color, width=2), marker=dict(color=color, size=8), text=hover,
-            hovertemplate=f"%{{x:.2f}} {spec['units']} at %{{y:.0f}} dbar<br>%{{text}}<extra></extra>"))
-        fig.update_xaxes(**AXIS, title_text=value_title)
-        fig.update_yaxes(**AXIS, title_text="Pressure (dbar)", autorange="reversed")
-        hovermode = "closest"
-    else:
-        labels = [MONTH_NAMES[r["bucket"] - 1] if spec["group_by"] == "month_of_year" else r["bucket"] for r in rows]
-        if len(band) > 1:
-            band_x = [labels[i] for i, r in enumerate(rows) if r.get("std") is not None]
-            fig.add_trace(go.Scatter(x=band_x, y=[r["mean"] + r["std"] for r in band], mode="lines",
-                                     line=dict(width=0), hoverinfo="skip", showlegend=False))
-            fig.add_trace(go.Scatter(x=band_x, y=[r["mean"] - r["std"] for r in band], mode="lines",
-                                     line=dict(width=0), fill="tonexty", fillcolor=translucent(color, 0.18),
-                                     hoverinfo="skip", showlegend=False))
-        fig.add_trace(go.Scatter(
-            x=labels, y=[r["mean"] for r in rows], name="Mean", mode="lines+markers" if len(rows) > 1 else "markers",
-            line=dict(color=color, width=2), marker=dict(color=color, size=8), text=hover,
-            hovertemplate=f"%{{y:.2f}} {spec['units']}<br>%{{text}}<extra></extra>"))
-        fig.update_xaxes(**AXIS, type="category" if spec["group_by"] == "month_of_year" else "date")
-        fig.update_yaxes(**AXIS, title_text=f"{value_title}, {lo:g}–{hi:g} dbar")
-        hovermode = "x unified"
-    fig.update_layout(**BASE_LAYOUT, height=260, showlegend=False, hovermode=hovermode)
-    fig.update_layout(margin=dict(l=60, r=12, t=8, b=36))
-    return fig
-
-
 # ── App ─────────────────────────────────────────────────────
 app = Dash(
     __name__,
@@ -474,7 +427,8 @@ def regions_pane():
             id="months-select", options=[{"label": name, "value": i + 1} for i, name in enumerate(MONTH_NAMES)],
             multi=True, placeholder="All months", searchable=False, className="dd")),
         field("Measurement", "variable-select", dcc.Dropdown(
-            id="variable-select", options=[{"label": label, "value": key} for key, (_, label, _) in VARIABLES.items()],
+            id="variable-select", options=[{"label": label, "value": key} for key, (_, label, _) in MEASURES.items()
+                                           if key != "profiles"],
             value="temp", **dropdown)),
         field("Chart", "group-select", dcc.Dropdown(
             id="group-select", options=[{"label": label, "value": value} for value, label in GROUP_OPTIONS],
@@ -496,7 +450,7 @@ app.layout = html.Div([
     dcc.Store(id="float-data", data=None),   # None while loading, {"error": ...} on failure
     dcc.Store(id="chat-selection", data=None),
     dcc.Store(id="map-highlight", data=None),   # {"filter": RegionFilter fields, "label": str}
-    dcc.Store(id="analysis", data=None),        # an aggregate_measurements result to chart
+    dcc.Store(id="analysis", data=None),        # an analysis.run_analysis result to chart
     dcc.Store(id="api-key-store", storage_type="session"),
     dcc.Store(id="server-ai", data={"enabled": ai_enabled()}),
     dcc.Store(id="scroll-sink"),
@@ -577,8 +531,9 @@ app.layout = html.Div([
                     html.Div([html.H3(id="analysis-title", className="chart-title"),
                               html.Button("Close", id="close-analysis", n_clicks=0, className="btn btn-ghost btn-sm")],
                              className="analysis-head"),
-                    dcc.Graph(id="analysis-chart", figure=placeholder_figure("", height=60),
-                              config={"displayModeBar": False}),
+                    html.P(id="analysis-message", className="analysis-message"),
+                    html.Div(dcc.Graph(id="analysis-chart", figure=placeholder_figure("", height=60),
+                                       config={"displayModeBar": False}), id="analysis-graph"),
                     html.P(id="analysis-caption", className="field-help"),
                 ], id="analysis-panel", className="analysis glass", hidden=True),
                 html.Div([
@@ -818,19 +773,17 @@ def region_highlight(n_clicks, region, months):
     prevent_initial_call=True,
     running=[(Output("region-chart-btn", "disabled"), True, False)],
 )
-def region_chart(n_clicks, region, months, variable, group_by):
-    args = {key: value for key, value in dict(region=region, months=months or None, variable=variable,
+def region_chart(n_clicks, region, months, measure, group_by):
+    args = {key: value for key, value in dict(region=region, months=months or None, measure=measure,
                                               group_by=group_by).items() if value is not None}
     try:
-        result = aggregate_measurements(**args)
-    except QueryLimitError:
-        return no_update, no_update, "Too many points to chart. Choose fewer months or group by calendar month."
+        result = run_analysis(**args)   # too much or too little data comes back as a status, not an error
     except ValueError:
         return no_update, no_update, "Choose a region from the list."
     except Exception as exc:
-        log.warning("Regional average unavailable (%s)", type(exc).__name__)
-        return no_update, no_update, "Couldn't compute that average. Try again in a minute."
-    actions = dashboard_actions(ToolPlan(tool="aggregate_measurements", arguments={}), result) or {}
+        log.warning("Regional analysis unavailable (%s)", type(exc).__name__)
+        return no_update, no_update, "Couldn't compute that. Try again in a minute."
+    actions = dashboard_actions(ToolPlan(tool="analyze", arguments={}), result) or {}
     return actions.get("chart", no_update), actions.get("highlight", no_update), ""
 
 
@@ -838,20 +791,18 @@ def region_chart(n_clicks, region, months, variable, group_by):
     Output("analysis-chart", "figure"),
     Output("analysis-title", "children"),
     Output("analysis-caption", "children"),
+    Output("analysis-message", "children"),
+    Output("analysis-graph", "hidden"),
     Output("analysis-panel", "hidden"),
     Input("analysis", "data"),
 )
-def render_analysis(spec):
-    if not spec:
-        return no_update, "", "", True
-    lo, hi = spec["pressure_range"]
-    parts = [f"Average of each profile's mean, {lo:g}–{hi:g} dbar",
-             f"{plural(spec['n_profiles'], 'profile')} from {plural(spec['n_floats'], 'float')}"]
-    if spec.get("first_date"):
-        parts.append(spec["first_date"] if spec["first_date"] == spec["last_date"]
-                     else f"{spec['first_date']} to {spec['last_date']}")
-    return (build_analysis_chart(spec), f"Mean {spec['label'].lower()} · {spec['filter_label']}",
-            " · ".join(parts), False)
+def render_analysis(result):
+    """Any analysis result: a chart with its caption, or the reason there is no chart."""
+    if not result:
+        return no_update, "", "", None, True, True
+    text = describe_result(result)
+    return (build_chart(result), text["title"], text["caption"], text["message"],
+            text["message"] is not None, False)
 
 
 @app.callback(

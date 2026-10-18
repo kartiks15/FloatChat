@@ -8,12 +8,6 @@ from database import QueryLimitError
 
 class DashboardTests(unittest.TestCase):
     POINT = dict(profile_id=9, wmo_id='2902115', latitude=0.5, longitude=80, date_utc='2024-03-15')
-    SPEC = dict(variable='temp', label='Temperature', units='°C', group_by='month_of_year',
-                pressure_range=[0, 10], bin_dbar=50, n_profiles=3, n_floats=1,
-                first_date='2023-05-10', last_date='2024-04-15', filter_label='5°S–5°N · Mar–Jun',
-                rows=[dict(bucket=3, mean=28, std=None, min=28, max=28, n_profiles=1, n_floats=1),
-                      dict(bucket=4, mean=26, std=None, min=26, max=26, n_profiles=1, n_floats=1)])
-
     def test_starts_without_model_or_database(self):
         client = app.server.test_client()
         self.assertEqual(client.get('/').status_code, 200)
@@ -127,23 +121,6 @@ class DashboardTests(unittest.TestCase):
             out = app.handle_chat(1, 0, 'equator', [], [])
         self.assertEqual(out[-3:], (no_update, highlight, chart))
 
-    def test_analysis_chart_time_series(self):
-        fig = app.build_analysis_chart(self.SPEC)
-        line = [t for t in fig.data if t.name == 'Mean'][0]
-        self.assertEqual((list(line.x), list(line.y)), (['Mar', 'Apr'], [28, 26]))
-        self.assertIn('°C', fig.layout.yaxis.title.text)
-        self.assertIn('0–10 dbar', fig.layout.yaxis.title.text)
-
-    def test_analysis_chart_pressure_is_reversed(self):
-        spec = dict(self.SPEC, group_by='pressure', pressure_range=[0, 2000],
-                    rows=[dict(bucket=0, mean=28, std=1, min=27, max=29, n_profiles=3, n_floats=1)])
-        fig = app.build_analysis_chart(spec)
-        self.assertEqual(fig.layout.yaxis.autorange, 'reversed')
-
-    def test_analysis_chart_empty(self):
-        fig = app.build_analysis_chart(dict(self.SPEC, rows=[], n_profiles=0, n_floats=0))
-        self.assertIn('No measurements match', fig.layout.annotations[0].text)
-
     def test_analysis_graph_keeps_its_figure_height(self):
         # A responsive graph sizes itself to the panel, which has no height of its own, and collapses.
         def find(node, target):
@@ -158,15 +135,6 @@ class DashboardTests(unittest.TestCase):
         graph = find(app.app.layout, 'analysis-chart')
         self.assertFalse(graph.config.get('responsive', False))
 
-    def test_render_analysis(self):
-        _, title, caption, hidden = app.render_analysis(self.SPEC)
-        self.assertEqual(title, 'Mean temperature · 5°S–5°N · Mar–Jun')
-        self.assertIn('3 profiles from 1 float', caption)
-        self.assertIn('2023-05-10 to 2024-04-15', caption)
-        self.assertFalse(hidden)
-        self.assertTrue(app.render_analysis(None)[3])
-        self.assertIsNone(app.close_analysis(1))
-
     def test_kpis_use_true_totals_not_the_float_list(self):
         with patch('app.db_query', return_value=[]), \
              patch('app.get_totals', return_value={'floats': 1234, 'profiles': 98765, 'latest': datetime(2026, 10, 12)}):
@@ -179,24 +147,29 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(app.region_highlight(1, 'equator', [6, 3]),
                          ({'filter': {'region': 'equator', 'months': [3, 6]}, 'label': '5°S–5°N · Mar, Jun'}, ''))
         self.assertEqual(app.region_highlight(1, 'pacific', None), (no_update, 'Choose a region from the list.'))
+    def test_render_analysis_shows_messages_and_charts(self):
+        no_data = dict(status='no_data', title='Mean temperature · Pacific Ocean (approx.)', series=[], notes=[],
+                       diagnosis='No profiles in the Pacific Ocean (approximate box) at all.', stat='mean',
+                       pressure_range=[0, 10], measure='temp', chart='line')
+        _, _, _, message, graph_hidden, panel_hidden = app.render_analysis(no_data)
+        self.assertEqual((message, graph_hidden, panel_hidden), (no_data['diagnosis'], True, False))
+        self.assertTrue(app.render_analysis(None)[5])
 
-    def test_region_chart_calls_aggregate_and_highlights(self):
-        spec = {'n_profiles': 2, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'rows': []}
-        with patch('app.aggregate_measurements', return_value=spec) as aggregate:
-            chart, highlight, feedback = app.region_chart(1, 'equator', [3, 4, 5, 6], 'temp', 'month_of_year')
-        aggregate.assert_called_once_with(region='equator', months=[3, 4, 5, 6], variable='temp', group_by='month_of_year')
-        self.assertEqual((chart, highlight['label'], feedback), (spec, '5°S–5°N', ''))
+    def test_region_chart_uses_the_analysis_engine(self):
+        result = {'status': 'ok', 'n_profiles': 2, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'series': []}
+        with patch('app.run_analysis', return_value=result) as run:
+            chart, highlight, feedback = app.region_chart(1, 'equator', [3, 4], 'temp', 'month_of_year')
+        run.assert_called_once_with(region='equator', months=[3, 4], measure='temp', group_by='month_of_year')
+        self.assertEqual((chart, highlight['label'], feedback), (result, '5°S–5°N', ''))
 
     def test_region_chart_with_no_matches_clears_highlight(self):
-        empty = {'n_profiles': 0, 'filter': {'region': 'bay_of_bengal'}, 'filter_label': 'x', 'rows': []}
-        with patch('app.aggregate_measurements', return_value=empty):
+        empty = {'status': 'no_data', 'n_profiles': 0, 'filter': {'region': 'bay_of_bengal'}, 'filter_label': 'x', 'series': []}
+        with patch('app.run_analysis', return_value=empty):
             chart, highlight, _ = app.region_chart(1, 'bay_of_bengal', [1], 'temp', 'month')
         self.assertEqual((chart, highlight), (empty, None))
 
     def test_region_chart_reports_errors_without_details(self):
-        with patch('app.aggregate_measurements', side_effect=QueryLimitError('Result exceeds 1000 rows')):
-            self.assertEqual(app.region_chart(1, 'equator', [], 'temp', 'week')[:2], (no_update, no_update))
-        with patch('app.aggregate_measurements', side_effect=RuntimeError('password=secret')):
+        with patch('app.run_analysis', side_effect=RuntimeError('password=secret')):
             feedback = app.region_chart(1, 'equator', [], 'temp', 'week')[2]
         self.assertNotIn('secret', feedback)
 

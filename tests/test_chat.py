@@ -133,10 +133,10 @@ class ChatTests(unittest.TestCase):
     def test_dashboard_actions_for_each_tool(self):
         plan = lambda tool: chat.ToolPlan(tool=tool, arguments={})
         region = {'n_profiles': 3, 'filter': {'region': 'equator'}, 'label': '5°S–5°N'}
-        aggregate = {'n_profiles': 3, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'rows': [{'bucket': 3}]}
+        aggregate = {'status': 'ok', 'n_profiles': 3, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'series': []}
         self.assertEqual(chat.dashboard_actions(plan('region_profiles'), region),
                          {'highlight': {'filter': {'region': 'equator'}, 'label': '5°S–5°N'}})
-        actions = chat.dashboard_actions(plan('aggregate_measurements'), aggregate)
+        actions = chat.dashboard_actions(plan('analyze'), aggregate)
         self.assertEqual((actions['chart'], actions['highlight']['label']), (aggregate, '5°S–5°N'))
         self.assertEqual(chat.dashboard_actions(plan('trajectory'), {'rows': [{'profile_id': 7, 'wmo_id': '1'}]}),
                          {'select': {'profile_id': 7, 'wmo_id': '1'}})
@@ -144,8 +144,8 @@ class ChatTests(unittest.TestCase):
 
     def test_empty_region_result_clears_the_old_highlight(self):
         # A stale highlight of an earlier region next to "no measurements" would mislead.
-        plan = chat.ToolPlan(tool='aggregate_measurements', arguments={})
-        empty = {'n_profiles': 0, 'filter': {}, 'filter_label': 'All profiles', 'rows': []}
+        plan = chat.ToolPlan(tool='analyze', arguments={})
+        empty = {'status': 'no_data', 'n_profiles': 0, 'filter': {}, 'filter_label': 'All profiles', 'series': []}
         self.assertEqual(chat.dashboard_actions(plan, empty), {'chart': empty, 'highlight': None})
         self.assertEqual(chat.dashboard_actions(chat.ToolPlan(tool='region_profiles', arguments={}),
                                                 {'n_profiles': 0, 'filter': {}, 'label': 'x'}), {'highlight': None})
@@ -161,6 +161,17 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn('claim a map was changed', answer_prompt)
         self.assertIn('dashboard', answer_prompt)
         self.assertEqual(actions['highlight']['label'], '5°S–5°N')
+
+    def test_analyze_and_unsupported_actions(self):
+        plan = lambda tool: chat.ToolPlan(tool=tool, arguments={})
+        result = {'status': 'ok', 'n_profiles': 3, 'filter': {'region': 'equator'}, 'filter_label': 'Equator', 'series': []}
+        self.assertEqual(chat.dashboard_actions(plan('analyze'), result),
+                         {'chart': result, 'highlight': {'filter': {'region': 'equator'}, 'label': 'Equator'}})
+        compared = dict(result, filter=None)
+        self.assertIsNone(chat.dashboard_actions(plan('analyze'), compared)['highlight'])
+        refused = execute_tool('unsupported', {'reason': 'Mixed-layer depth is not available.'})
+        self.assertEqual(chat.dashboard_actions(plan('unsupported'), refused), {'chart': refused})
+        self.assertEqual(refused['status'], 'unsupported')
 
     def test_bedrock_converse_request(self):
         client = MagicMock()

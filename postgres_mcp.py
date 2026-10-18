@@ -52,15 +52,23 @@ def find_region_profiles(region: str | None = None, lat_min: float | None = None
 
 
 @mcp.tool()
-def aggregate_measurements(variable: str = "temp", group_by: str = "month", pres_min: float = 0,
-                           pres_max: float | None = None, bin_dbar: int = 50, region: str | None = None,
-                           lat_min: float | None = None, lat_max: float | None = None,
-                           lon_min: float | None = None, lon_max: float | None = None,
-                           start_date: str | None = None, end_date: str | None = None,
-                           months: list[int] | None = None, wmo_id: str | None = None) -> str:
-    """Mean of per-profile means by week, month, month_of_year or pressure bin."""
-    return json.dumps(execute_tool("aggregate_measurements", _given(locals())), default=str)
+def analyze(measure: str = "temp", stat: str = "mean", group_by: str = "month", compare_by: str = "none",
+            compare_values: list[str] | None = None, x_measure: str | None = None, chart: str = "auto",
+            region: str | None = None, lat_min: float | None = None, lat_max: float | None = None,
+            lon_min: float | None = None, lon_max: float | None = None, start_date: str | None = None,
+            end_date: str | None = None, months: list[int] | None = None, wmo_id: str | None = None,
+            pres_min: float | None = None, pres_max: float | None = None, depth_bin: int = 50,
+            band_deg: float = 5, bins: int = 30) -> str:
+    """Any statistic of temp/psal/doxy/chla/nitrate/bbp700 (or profile counts) by time, season, depth, float or
+    lat/lon band, for named regions (incl. approximate oceans) or a box; compare up to 4 regions, floats or years.
+    Returns the data with a status (ok, no_data with a diagnosis, low_data, too_many)."""
+    return json.dumps(execute_tool("analyze", _given(locals())), default=str)
 
+
+@mcp.tool()
+def data_coverage() -> str:
+    """What the database covers: floats, profiles, dates, area and values per measurement."""
+    return json.dumps(execute_tool("data_coverage", {}), default=str)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
