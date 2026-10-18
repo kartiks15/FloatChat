@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from database import fetch_rows
 from chat_service import answer_question, ai_enabled, user_keys_allowed, openrouter_models, MAX_QUERY_CHARS
-from ocean_tools import region_points
+from ocean_tools import MONTH_NAMES, region_points
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -281,6 +281,64 @@ def build_ts_diagram(wmo_id=None):
     return fig
 
 
+def plural(count, noun):
+    return f"{count:,} {noun}{'' if count == 1 else 's'}"
+
+
+def translucent(hex_color, alpha):
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def build_analysis_chart(spec):
+    """One series: the mean of per-profile means, with a ± one standard deviation band."""
+    rows = spec.get("rows") or []
+    if not rows:
+        return placeholder_figure("No measurements match this filter", height=160)
+    color = COLORS.get(spec["variable"], ACCENT)
+    lo, hi = spec["pressure_range"]
+    value_title = f"{spec['label']} ({spec['units']})"
+    hover = [f"{plural(r['n_profiles'], 'profile')} · {plural(r['n_floats'], 'float')}" for r in rows]
+    band = [r for r in rows if r.get("std") is not None]
+    fig = go.Figure()
+    if spec["group_by"] == "pressure":
+        half = spec.get("bin_dbar", 50) / 2
+        depth = [r["bucket"] + half for r in rows]
+        if len(band) > 1:
+            band_depth = [r["bucket"] + half for r in band]
+            fig.add_trace(go.Scatter(x=[r["mean"] + r["std"] for r in band], y=band_depth, mode="lines",
+                                     line=dict(width=0), hoverinfo="skip", showlegend=False))
+            fig.add_trace(go.Scatter(x=[r["mean"] - r["std"] for r in band], y=band_depth, mode="lines",
+                                     line=dict(width=0), fill="tonextx", fillcolor=translucent(color, 0.18),
+                                     hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scatter(
+            x=[r["mean"] for r in rows], y=depth, name="Mean", mode="lines+markers" if len(rows) > 1 else "markers",
+            line=dict(color=color, width=2), marker=dict(color=color, size=8), text=hover,
+            hovertemplate=f"%{{x:.2f}} {spec['units']} at %{{y:.0f}} dbar<br>%{{text}}<extra></extra>"))
+        fig.update_xaxes(**AXIS, title_text=value_title)
+        fig.update_yaxes(**AXIS, title_text="Pressure (dbar)", autorange="reversed")
+        hovermode = "closest"
+    else:
+        labels = [MONTH_NAMES[r["bucket"] - 1] if spec["group_by"] == "month_of_year" else r["bucket"] for r in rows]
+        if len(band) > 1:
+            band_x = [labels[i] for i, r in enumerate(rows) if r.get("std") is not None]
+            fig.add_trace(go.Scatter(x=band_x, y=[r["mean"] + r["std"] for r in band], mode="lines",
+                                     line=dict(width=0), hoverinfo="skip", showlegend=False))
+            fig.add_trace(go.Scatter(x=band_x, y=[r["mean"] - r["std"] for r in band], mode="lines",
+                                     line=dict(width=0), fill="tonexty", fillcolor=translucent(color, 0.18),
+                                     hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scatter(
+            x=labels, y=[r["mean"] for r in rows], name="Mean", mode="lines+markers" if len(rows) > 1 else "markers",
+            line=dict(color=color, width=2), marker=dict(color=color, size=8), text=hover,
+            hovertemplate=f"%{{y:.2f}} {spec['units']}<br>%{{text}}<extra></extra>"))
+        fig.update_xaxes(**AXIS, type="category" if spec["group_by"] == "month_of_year" else "date")
+        fig.update_yaxes(**AXIS, title_text=f"{value_title}, {lo:g}–{hi:g} dbar")
+        hovermode = "x unified"
+    fig.update_layout(**BASE_LAYOUT, height=260, showlegend=False, hovermode=hovermode)
+    fig.update_layout(margin=dict(l=60, r=12, t=8, b=36))
+    return fig
+
+
 # ── App ─────────────────────────────────────────────────────
 app = Dash(
     __name__,
@@ -506,12 +564,22 @@ app.layout = html.Div([
                 ], className="period"),
             ], className="toolbar glass reveal", style={"--d": 160}),
             html.Div([
-                html.Div(status_chip("Connecting", "idle"), id="db-status", className="status"),
-                html.Div([html.Span(className="highlight-swatch"), html.Span(id="highlight-label"),
-                          html.Button("Clear", id="clear-highlight", n_clicks=0, className="btn btn-ghost btn-sm")],
-                         id="highlight-chip", className="highlight-chip", hidden=True),
-                html.Div("Click a dot to inspect a profile", className="hint"),
-            ], className="statusbar glass reveal", style={"--d": 240}),
+                html.Section([
+                    html.Div([html.H3(id="analysis-title", className="chart-title"),
+                              html.Button("Close", id="close-analysis", n_clicks=0, className="btn btn-ghost btn-sm")],
+                             className="analysis-head"),
+                    dcc.Graph(id="analysis-chart", figure=placeholder_figure("", height=60),
+                              config={"displayModeBar": False, "responsive": True}),
+                    html.P(id="analysis-caption", className="field-help"),
+                ], id="analysis-panel", className="analysis glass", hidden=True),
+                html.Div([
+                    html.Div(status_chip("Connecting", "idle"), id="db-status", className="status"),
+                    html.Div([html.Span(className="highlight-swatch"), html.Span(id="highlight-label"),
+                              html.Button("Clear", id="clear-highlight", n_clicks=0, className="btn btn-ghost btn-sm")],
+                             id="highlight-chip", className="highlight-chip", hidden=True),
+                    html.Div("Click a dot to inspect a profile", className="hint"),
+                ], className="statusbar glass reveal", style={"--d": 240}),
+            ], className="center-bottom"),
         ], className="col-center"),
 
         # Right column: inspector
@@ -711,6 +779,35 @@ def update_highlight(highlight):
     prevent_initial_call=True,
 )
 def clear_highlight(n_clicks):
+    return None
+
+
+@app.callback(
+    Output("analysis-chart", "figure"),
+    Output("analysis-title", "children"),
+    Output("analysis-caption", "children"),
+    Output("analysis-panel", "hidden"),
+    Input("analysis", "data"),
+)
+def render_analysis(spec):
+    if not spec:
+        return no_update, "", "", True
+    lo, hi = spec["pressure_range"]
+    parts = [f"Average of each profile's mean, {lo:g}–{hi:g} dbar",
+             f"{plural(spec['n_profiles'], 'profile')} from {plural(spec['n_floats'], 'float')}"]
+    if spec.get("first_date"):
+        parts.append(spec["first_date"] if spec["first_date"] == spec["last_date"]
+                     else f"{spec['first_date']} to {spec['last_date']}")
+    return (build_analysis_chart(spec), f"Mean {spec['label'].lower()} · {spec['filter_label']}",
+            " · ".join(parts), False)
+
+
+@app.callback(
+    Output("analysis", "data", allow_duplicate=True),
+    Input("close-analysis", "n_clicks"),
+    prevent_initial_call=True,
+)
+def close_analysis(n_clicks):
     return None
 
 

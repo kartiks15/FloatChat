@@ -82,7 +82,7 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .col-left { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .col-center { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-start; gap: 12px; min-width: 0; }
 .col-right { display: flex; min-height: 0; }
-.brand, .panel, .toolbar, .statusbar { pointer-events: auto; }
+.brand, .panel, .toolbar, .statusbar, .analysis { pointer-events: auto; }
 
 .glass {
   background: var(--glass);
@@ -120,6 +120,11 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .highlight-chip { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); }
 .highlight-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--highlight); flex: none; }
 .btn-sm { padding: 3px 10px; font-size: 12px; font-weight: 500; border-radius: 999px; }
+
+/* Analysis panel: floats above the status bar */
+.center-bottom { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; min-width: 0; max-width: 100%; }
+.analysis { width: min(620px, 100%); padding: 12px 14px 10px; border-radius: var(--radius); animation: rise 0.6s var(--ease) both; }
+.analysis-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 .status-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .status-dot.is-live, .is-on .status-dot { background: var(--accent); }
@@ -328,8 +333,10 @@ a { color: var(--accent); text-underline-offset: 2px; }
   .toolbar { order: 2; }
   .map-stage { order: 3; position: relative; inset: auto; height: 60vh; min-height: 420px; border-radius: var(--radius-xl); overflow: hidden; border: 1px solid var(--line); }
   .statusbar { order: 4; align-self: flex-start; }
-  .sidebar { order: 5; flex: none; height: 600px; }
-  .inspector { order: 6; flex: none; }
+  .shell .center-bottom { display: contents; }
+  .analysis { order: 5; width: 100%; }
+  .sidebar { order: 6; flex: none; height: 600px; }
+  .inspector { order: 7; flex: none; }
   .inspector-body { overflow: visible; }
   .map-stage .maplibregl-ctrl-bottom-right { right: 0 !important; bottom: 0 !important; }
   .glass { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--surface); }

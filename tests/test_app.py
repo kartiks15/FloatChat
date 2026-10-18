@@ -6,6 +6,11 @@ import app
 
 class DashboardTests(unittest.TestCase):
     POINT = dict(profile_id=9, wmo_id='2902115', latitude=0.5, longitude=80, date_utc='2024-03-15')
+    SPEC = dict(variable='temp', label='Temperature', units='°C', group_by='month_of_year',
+                pressure_range=[0, 10], bin_dbar=50, n_profiles=3, n_floats=1,
+                first_date='2023-05-10', last_date='2024-04-15', filter_label='5°S–5°N · Mar–Jun',
+                rows=[dict(bucket=3, mean=28, std=None, min=28, max=28, n_profiles=1, n_floats=1),
+                      dict(bucket=4, mean=26, std=None, min=26, max=26, n_profiles=1, n_floats=1)])
 
     def test_starts_without_model_or_database(self):
         client = app.server.test_client()
@@ -119,6 +124,32 @@ class DashboardTests(unittest.TestCase):
              patch('app.answer_question', return_value=('ok', {'highlight': highlight, 'chart': chart})):
             out = app.handle_chat(1, 0, 'equator', [], [])
         self.assertEqual(out[-3:], (no_update, highlight, chart))
+
+    def test_analysis_chart_time_series(self):
+        fig = app.build_analysis_chart(self.SPEC)
+        line = [t for t in fig.data if t.name == 'Mean'][0]
+        self.assertEqual((list(line.x), list(line.y)), (['Mar', 'Apr'], [28, 26]))
+        self.assertIn('°C', fig.layout.yaxis.title.text)
+        self.assertIn('0–10 dbar', fig.layout.yaxis.title.text)
+
+    def test_analysis_chart_pressure_is_reversed(self):
+        spec = dict(self.SPEC, group_by='pressure', pressure_range=[0, 2000],
+                    rows=[dict(bucket=0, mean=28, std=1, min=27, max=29, n_profiles=3, n_floats=1)])
+        fig = app.build_analysis_chart(spec)
+        self.assertEqual(fig.layout.yaxis.autorange, 'reversed')
+
+    def test_analysis_chart_empty(self):
+        fig = app.build_analysis_chart(dict(self.SPEC, rows=[], n_profiles=0, n_floats=0))
+        self.assertIn('No measurements match', fig.layout.annotations[0].text)
+
+    def test_render_analysis(self):
+        _, title, caption, hidden = app.render_analysis(self.SPEC)
+        self.assertEqual(title, 'Mean temperature · 5°S–5°N · Mar–Jun')
+        self.assertIn('3 profiles from 1 float', caption)
+        self.assertIn('2023-05-10 to 2024-04-15', caption)
+        self.assertFalse(hidden)
+        self.assertTrue(app.render_analysis(None)[3])
+        self.assertIsNone(app.close_analysis(1))
 
 
 if __name__ == '__main__':
