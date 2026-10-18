@@ -144,6 +144,20 @@ class DashboardTests(unittest.TestCase):
         fig = app.build_analysis_chart(dict(self.SPEC, rows=[], n_profiles=0, n_floats=0))
         self.assertIn('No measurements match', fig.layout.annotations[0].text)
 
+    def test_analysis_graph_keeps_its_figure_height(self):
+        # A responsive graph sizes itself to the panel, which has no height of its own, and collapses.
+        def find(node, target):
+            if getattr(node, 'id', None) == target:
+                return node
+            children = getattr(node, 'children', None)
+            for child in children if isinstance(children, list) else [children] if children is not None else []:
+                found = find(child, target)
+                if found is not None:
+                    return found
+            return None
+        graph = find(app.app.layout, 'analysis-chart')
+        self.assertFalse(graph.config.get('responsive', False))
+
     def test_render_analysis(self):
         _, title, caption, hidden = app.render_analysis(self.SPEC)
         self.assertEqual(title, 'Mean temperature · 5°S–5°N · Mar–Jun')

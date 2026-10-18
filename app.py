@@ -387,7 +387,8 @@ def security_headers(response):
 
 
 # ── Components ──────────────────────────────────────────────
-SUGGESTIONS = ["Summarise the dataset", "List floats from INCOIS", "Profiles near 12°N 72°E"]
+SUGGESTIONS = ["Summarise the dataset", "List floats from INCOIS", "Profiles near 12°N 72°E",
+               "Average temperature on the equator, Mar–Jun"]
 
 
 def icon(name, extra=""):
@@ -615,7 +616,7 @@ app.layout = html.Div([
                               html.Button("Close", id="close-analysis", n_clicks=0, className="btn btn-ghost btn-sm")],
                              className="analysis-head"),
                     dcc.Graph(id="analysis-chart", figure=placeholder_figure("", height=60),
-                              config={"displayModeBar": False, "responsive": True}),
+                              config={"displayModeBar": False}),
                     html.P(id="analysis-caption", className="field-help"),
                 ], id="analysis-panel", className="analysis glass", hidden=True),
                 html.Div([
