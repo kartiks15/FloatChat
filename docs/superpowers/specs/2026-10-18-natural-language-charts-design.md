@@ -56,11 +56,14 @@ approximate ocean boxes, labelled "approximate" wherever they appear:
 
 | Region | Latitude | Longitude |
 | --- | --- | --- |
-| `indian_ocean` | 60°S–30°N | 20°E–120°E |
-| `pacific_ocean` | 60°S–60°N | 120°E–70°W (crosses ±180°) |
+| `indian_ocean` | 60°S–30°N, plus 60°S–30°S | 20°E–120°E, plus 120°E–147°E (south of Australia) |
+| `pacific_ocean` | 60°S–60°N, plus 30°S–60°N | 147°E–70°W (crosses ±180°), plus 120°E–147°E (north of 30°S) |
 | `atlantic_ocean` | 60°S–65°N | 70°W–20°E |
 | `southern_ocean` | 90°S–60°S | all |
 | `arctic_ocean` | 66°N–90°N | all |
+
+(Amended during implementation: south of Australia the Indian/Pacific boundary runs down from
+Tasmania at ~147°E, so each of those oceans is two boxes; still boxes, not polygons.)
 
 **Combination rules** (rejected with a clear message otherwise):
 

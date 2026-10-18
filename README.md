@@ -10,13 +10,17 @@ without ever writing SQL.
   a dot to inspect it; pick a float to see its trajectory. Filter by period.
 - **Profile inspector**: temperature and salinity against pressure, biogeochemistry (oxygen,
   chlorophyll-a, nitrate, backscatter) when measured, and a temperature–salinity diagram.
-- **Regions tab** (no AI needed): highlight every profile in a region (Equator 5°S–5°N, Arabian
-  Sea, Bay of Bengal) for chosen months, and chart the average of any measurement by calendar
-  month, month, week or depth.
-- **Ask AI**: plain-English questions such as *"Highlight all the floats on the equator"* or
-  *"Graph the average temperature of floats on the equator from March to June"*. The model picks
-  one of seven fixed, validated read-only operations; Python runs it; the model explains the
-  result. Answers can select a profile, highlight a region on the map, or open a chart.
+- **Charts from any question**: a statistic (mean, median, min, max, standard deviation, count,
+  percentiles) of temperature, salinity, oxygen, chlorophyll-a, nitrate, backscatter or profile
+  counts, grouped by time, season, depth, float or latitude/longitude band, for a named region
+  (equator, Arabian Sea, Bay of Bengal, approximate ocean boxes) or a box, comparing up to four
+  regions, floats or years — as a line, bar, depth profile, histogram, scatter or map.
+- **Honest answers**: when the data can't answer, it says why, e.g. *"No profiles in the Pacific
+  Ocean (approximate box) at all. This database has 20 floats in the Indian Ocean area…"*.
+- **Analyze tab** (no AI needed): every chart option from dropdowns, plus a map highlight.
+- **Ask AI**: plain-English questions. The model picks one of nine fixed, validated read-only
+  operations and fills in its arguments (it never writes SQL); Python runs it; the model explains
+  the result. Answers can select a profile, highlight a region on the map, or open a chart.
 - **Open-weight models only**: OpenRouter (visitors can paste their own key), Amazon Bedrock
   (Qwen3 32B) or a local Ollama. No OpenAI dependency.
 
@@ -83,13 +87,22 @@ Requests are rate-limited (`AI_DAILY_REQUEST_LIMIT`, `AI_HOURLY_CLIENT_LIMIT`,
 - "Highlight all the floats on the equator"
 - "Graph the average temperature of floats on the equator from March to June"
 - "Average salinity by depth in the Arabian Sea in 2024"
+- "Compare oxygen in the Arabian Sea and Bay of Bengal by month"
+- "Maximum chlorophyll per year"
+- "Histogram of surface temperatures in 2024"
+- "Temperature against salinity on the equator"
+- "Mean temperature in the Pacific Ocean" (answers that there is no Pacific data, and what there is)
 
 ## Repository layout
 
 ```
-app.py              Dash dashboard: map, inspector, Regions tab, chat, Analysis panel
-chat_service.py     AI pipeline: providers, quotas, plan → tool → answer → dashboard actions
-ocean_tools.py      The validated read-only operations (region filters and averages included)
+app.py              Dash dashboard: map, inspector, Analyze tab, chat, Analysis panel
+chat_service.py     AI pipeline: providers, quotas, plan (+1 repair) → tool → answer → dashboard actions
+ocean_tools.py      The validated read-only operations (tool registry)
+analysis.py         Analysis engine: any statistic/grouping/comparison → safe SQL → result + diagnosis
+charts.py           Figures and captions for every analysis chart type
+regions.py          Named regions (incl. approximate oceans) and the shared region filter
+theme.py            Design tokens and shared Plotly styling
 database.py         Read-only, time-limited, row-capped PostgreSQL access
 argo_etl.py         NetCDF → PostgreSQL importer
 download_argo.py    Argo file downloader
