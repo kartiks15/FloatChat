@@ -868,7 +868,7 @@ keeping a stale `data_mode`, top-bar totals capped at 500 floats, and the unused
 2. **Analyses and highlights are capped.** A highlight draws at most 5,000 profiles (the label
    says "latest 5,000"); a chart has at most 1,000 points per series (daily over many years
    exceeds that and returns "too many points"); histograms and maps use at most 5,000 profiles;
-   scatters use random levels from up to 300 random profiles.
+   scatters use random levels from up to 300 random profiles that measure both quantities.
 3. **"The equator" means 5°S–5°N, and oceans are approximate boxes.** Ask for explicit bounds
    ("within 1° of the equator") for a narrower band, or change `REGIONS` in `regions.py`. Exact
    ocean borders would need an outside sea-areas dataset and geometry libraries.
@@ -878,7 +878,10 @@ keeping a stale `data_mode`, top-bar totals capped at 500 floats, and the unused
 5. **A reused map graph can freeze.** `dcc.Graph` chains redraws on one promise without
    catching errors, so if MapLibre rejects an update ("Style is not done loading"), that graph
    ignores later updates until the page reloads. The Analysis panel avoids it (a fresh graph per
-   result, `Scattergeo` maps); the main map can still hit it.
+   result, `Scattergeo` maps); the main map can still hit it. It has only been seen when the page
+   loads in a hidden or zero-width view (such as a collapsed preview pane), where the map style
+   never loads; in a visible tab the map loads and updates normally. If the map stops updating,
+   reload the page.
 6. **The map shows at most 5,000 profiles** (newest first). The status chip says
    "(latest shown)" when the cap is hit.
 7. **"Latest 5,000 levels" in the T–S diagram means most recently imported**, because it
