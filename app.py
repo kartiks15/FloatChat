@@ -65,6 +65,13 @@ def get_float_list():
         GROUP BY f.wmo_id, f.dac ORDER BY n_profiles DESC, f.wmo_id LIMIT 500""")
 
 
+def get_totals():
+    """True dataset totals for the top bar (the float list is capped at 500)."""
+    rows = db_query("""SELECT (SELECT COUNT(*) FROM floats) AS floats, COUNT(*) AS profiles,
+        MAX(date_utc) AS latest FROM profiles""")
+    return rows[0] if rows else {"floats": 0, "profiles": 0, "latest": None}
+
+
 def fmt_date(value):
     return str(value)[:10] if value else "—"
 
@@ -644,6 +651,7 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None, highlight=N
             AND longitude BETWEEN -180 AND 180 {date_clause}
             ORDER BY date_utc DESC NULLS LAST, profile_id DESC LIMIT {MAP_PROFILE_LIMIT}""", params)
         floats = get_float_list()
+        totals = get_totals()
         trajectory = get_trajectory(selected_wmo) if selected_wmo else []
         selected = get_profile_meta(selected_profile) if selected_profile else None
         # The highlight shows its own filter, independent of the period.
@@ -662,10 +670,8 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None, highlight=N
             status += " (latest shown)"
     else:
         status = "No profiles in this period"
-    latest = max((f["last"] for f in float_data if f["last"]), default=None)
-    kpis = [kpi(f"{len(float_data):,}", "floats"),
-            kpi(f"{sum(f['n_profiles'] for f in float_data):,}", "profiles"),
-            kpi(latest or "—", "latest")]
+    kpis = [kpi(f"{totals['floats']:,}", "floats"), kpi(f"{totals['profiles']:,}", "profiles"),
+            kpi(fmt_date(totals["latest"]), "latest")]
     return (float_data, build_map(profiles, selected_wmo, trajectory, selected, highlighted),
             status_chip(status, "live"), kpis)
 

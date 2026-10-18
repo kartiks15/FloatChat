@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 from dash import no_update
 import app
@@ -150,6 +151,14 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(hidden)
         self.assertTrue(app.render_analysis(None)[3])
         self.assertIsNone(app.close_analysis(1))
+
+    def test_kpis_use_true_totals_not_the_float_list(self):
+        with patch('app.db_query', return_value=[]), \
+             patch('app.get_totals', return_value={'floats': 1234, 'profiles': 98765, 'latest': datetime(2026, 10, 12)}):
+            kpis = app.load_data('all')[3]
+        self.assertIn('1,234', str(kpis))
+        self.assertIn('98,765', str(kpis))
+        self.assertIn('2026-10-12', str(kpis))
 
 
 if __name__ == '__main__':
