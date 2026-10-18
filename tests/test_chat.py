@@ -49,10 +49,10 @@ class ChatTests(unittest.TestCase):
         with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \
              patch('chat_service.generate', side_effect=['{"tool":"profile_data","arguments":{"profile_id":1}}', 'Temperature is 20 C.']) as model, \
              patch('chat_service.execute_tool', return_value={'profile': {'profile_id': 1, 'wmo_id': '2902115'}, 'rows': [{'temp': 20}]}):
-            answer, selection = chat.answer_question('Show profile 1')
+            answer, actions = chat.answer_question('Show profile 1')
             self.assertEqual(model.call_count, 2)
             self.assertIn('20', model.call_args.args[1])
-            self.assertEqual(selection['profile_id'], 1)
+            self.assertEqual(actions['select']['profile_id'], 1)
             self.assertIn('20', answer)
 
     def test_limits_and_redacts_errors(self):
@@ -129,6 +129,37 @@ class ChatTests(unittest.TestCase):
                 chat.reserve_request('visitor', shared=False)
             with self.assertRaises(chat.QuotaExceeded):
                 chat.reserve_request('visitor')
+
+    def test_dashboard_actions_for_each_tool(self):
+        plan = lambda tool: chat.ToolPlan(tool=tool, arguments={})
+        region = {'n_profiles': 3, 'filter': {'region': 'equator'}, 'label': '5°S–5°N'}
+        aggregate = {'n_profiles': 3, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'rows': [{'bucket': 3}]}
+        self.assertEqual(chat.dashboard_actions(plan('region_profiles'), region),
+                         {'highlight': {'filter': {'region': 'equator'}, 'label': '5°S–5°N'}})
+        actions = chat.dashboard_actions(plan('aggregate_measurements'), aggregate)
+        self.assertEqual((actions['chart'], actions['highlight']['label']), (aggregate, '5°S–5°N'))
+        self.assertEqual(chat.dashboard_actions(plan('trajectory'), {'rows': [{'profile_id': 7, 'wmo_id': '1'}]}),
+                         {'select': {'profile_id': 7, 'wmo_id': '1'}})
+        self.assertIsNone(chat.dashboard_actions(plan('dataset_summary'), {'floats': 2}))
+
+    def test_actions_skip_empty_highlight(self):
+        plan = chat.ToolPlan(tool='aggregate_measurements', arguments={})
+        empty = {'n_profiles': 0, 'filter': {}, 'filter_label': 'All profiles', 'rows': []}
+        self.assertEqual(chat.dashboard_actions(plan, empty), {'chart': empty})
+        self.assertIsNone(chat.dashboard_actions(chat.ToolPlan(tool='region_profiles', arguments={}),
+                                                 {'n_profiles': 0, 'filter': {}, 'label': 'x'}))
+
+    def test_prompts_describe_regions_and_dashboard(self):
+        with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \
+             patch('chat_service.generate', side_effect=['{"tool":"region_profiles","arguments":{"region":"equator"}}', 'Three.']) as model, \
+             patch('chat_service.execute_tool', return_value={'n_profiles': 3, 'filter': {'region': 'equator'}, 'label': '5°S–5°N'}):
+            answer, actions = chat.answer_question('Highlight floats on the equator')
+        plan_prompt, answer_prompt = model.call_args_list[0].args[0], model.call_args_list[1].args[0]
+        self.assertIn('March to June', plan_prompt)
+        self.assertIn('5°S–5°N', plan_prompt)
+        self.assertNotIn('claim a map was changed', answer_prompt)
+        self.assertIn('dashboard', answer_prompt)
+        self.assertEqual(actions['highlight']['label'], '5°S–5°N')
 
     def test_bedrock_converse_request(self):
         client = MagicMock()
