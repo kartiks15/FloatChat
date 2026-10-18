@@ -17,6 +17,7 @@ Run:
 import logging
 import math
 import os
+import uuid
 
 from pydantic import ValidationError
 from dash import Dash, dcc, html, Input, Output, State, ctx, no_update, ALL, Patch, clientside_callback
@@ -549,12 +550,7 @@ app.layout = html.Div([
                               html.Button("Close", id="close-analysis", n_clicks=0, className="btn btn-ghost btn-sm")],
                              className="analysis-head"),
                     html.P(id="analysis-message", className="analysis-message"),
-                    # Maps get their own graph: one Plotly graph can't switch between map and cartesian.
-                    html.Div(dcc.Graph(id="analysis-chart", figure=placeholder_figure("", height=60),
-                                       config={"displayModeBar": False}), id="analysis-graph"),
-                    html.Div(dcc.Graph(id="analysis-map", figure=placeholder_figure("", height=60),
-                                       config={"displayModeBar": False, "scrollZoom": True}),
-                             id="analysis-map-graph", hidden=True),
+                    html.Div(id="analysis-figure"),   # a fresh graph per result (see analysis_graph)
                     html.P(id="analysis-caption", className="field-help"),
                 ], id="analysis-panel", className="analysis glass", hidden=True),
                 html.Div([
@@ -816,27 +812,27 @@ def region_chart(n_clicks, region, months, measure, group_by, stat="mean", chart
 
 
 @app.callback(
-    Output("analysis-chart", "figure"),
-    Output("analysis-map", "figure"),
+    Output("analysis-figure", "children"),
     Output("analysis-title", "children"),
     Output("analysis-caption", "children"),
     Output("analysis-message", "children"),
-    Output("analysis-graph", "hidden"),
-    Output("analysis-map-graph", "hidden"),
     Output("analysis-panel", "hidden"),
     Input("analysis", "data"),
 )
 def render_analysis(result):
-    """Any analysis result: a chart (or map) with its caption, or the reason there is no chart."""
+    """Any analysis result: a chart with its caption, or the reason there is no chart."""
     if not result:
-        return no_update, no_update, "", "", None, True, True, True
+        return None, "", "", None, True
     text = describe_result(result)
-    if text["message"] is not None:
-        return no_update, no_update, text["title"], text["caption"], text["message"], True, True, False
-    figure = build_chart(result)
-    is_map = result["chart"] == "map"
-    return (no_update if is_map else figure, figure if is_map else no_update, text["title"], text["caption"],
-            None, is_map, not is_map, False)
+    graph = None if text["message"] is not None else analysis_graph(build_chart(result))
+    return graph, text["title"], text["caption"], text["message"], False
+
+
+def analysis_graph(figure):
+    """A brand-new graph for every result. Reusing one dcc.Graph fails: Plotly can't switch it between
+    map and cartesian, and after one failed redraw (a colour bar drawn at zero size) it ignores every
+    later figure. A new React key mounts a fresh graph."""
+    return html.Div(dcc.Graph(figure=figure, config={"displayModeBar": False}), key=uuid.uuid4().hex)
 
 
 @app.callback(

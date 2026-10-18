@@ -121,19 +121,15 @@ class DashboardTests(unittest.TestCase):
             out = app.handle_chat(1, 0, 'equator', [], [])
         self.assertEqual(out[-3:], (no_update, highlight, chart))
 
+    MAP_RESULT = dict(status='ok', title='Oxygen by location · Indian Ocean (approx.)', chart='map', series=[],
+                      points=[dict(lat=0, lon=80, value=200, profile_id=1, wmo_id='1')], notes=[], stat='mean',
+                      measure='doxy', measure_label='Oxygen', units='µmol/kg', pressure_range=[0, 10],
+                      n_profiles=1, n_floats=1, group_by='none', depth_bin=50, x_measure=None)
+
     def test_analysis_graph_keeps_its_figure_height(self):
         # A responsive graph sizes itself to the panel, which has no height of its own, and collapses.
-        def find(node, target):
-            if getattr(node, 'id', None) == target:
-                return node
-            children = getattr(node, 'children', None)
-            for child in children if isinstance(children, list) else [children] if children is not None else []:
-                found = find(child, target)
-                if found is not None:
-                    return found
-            return None
-        graph = find(app.app.layout, 'analysis-chart')
-        self.assertFalse(graph.config.get('responsive', False))
+        wrapper = app.render_analysis(self.MAP_RESULT)[0]
+        self.assertFalse(wrapper.children.config.get('responsive', False))
 
     def test_kpis_use_true_totals_not_the_float_list(self):
         with patch('app.db_query', return_value=[]), \
@@ -151,23 +147,18 @@ class DashboardTests(unittest.TestCase):
         no_data = dict(status='no_data', title='Mean temperature · Pacific Ocean (approx.)', series=[], notes=[],
                        diagnosis='No profiles in the Pacific Ocean (approximate box) at all.', stat='mean',
                        pressure_range=[0, 10], measure='temp', chart='line')
-        _, _, _, _, message, chart_hidden, map_hidden, panel_hidden = app.render_analysis(no_data)
-        self.assertEqual((message, chart_hidden, map_hidden, panel_hidden), (no_data['diagnosis'], True, True, False))
-        self.assertTrue(app.render_analysis(None)[7])
+        graph, _, _, message, panel_hidden = app.render_analysis(no_data)
+        self.assertEqual((graph, message, panel_hidden), (None, no_data['diagnosis'], False))
+        self.assertTrue(app.render_analysis(None)[4])
 
-    def test_map_results_use_their_own_graph(self):
-        # One Plotly graph can't switch between a map and a cartesian chart, so maps get their own.
-        result = dict(status='ok', title='Oxygen by location · Indian Ocean (approx.)', chart='map', series=[],
-                      points=[dict(lat=0, lon=80, value=200, profile_id=1, wmo_id='1')], notes=[], stat='mean',
-                      measure='doxy', measure_label='Oxygen', units='µmol/kg', pressure_range=[0, 10],
-                      n_profiles=1, n_floats=1, group_by='none', depth_bin=50, x_measure=None)
-        chart_fig, map_fig, *_, chart_hidden, map_hidden, panel_hidden = app.render_analysis(result)
-        self.assertIs(chart_fig, no_update)
-        self.assertEqual(map_fig.data[0].type, 'scattergeo')
-        self.assertEqual((chart_hidden, map_hidden, panel_hidden), (True, False, False))
-        histogram = dict(result, chart='histogram', points=[dict(x=200, x0=190, x1=210, y=1)])
-        chart_fig, map_fig, *_, chart_hidden, map_hidden, _ = app.render_analysis(histogram)
-        self.assertEqual((chart_fig.data[0].type, map_fig, chart_hidden, map_hidden), ('bar', no_update, False, True))
+    def test_each_analysis_gets_a_fresh_graph(self):
+        # Reusing one dcc.Graph fails: Plotly can't switch it between map and cartesian, and after one
+        # failed redraw it ignores every later figure. A new React key mounts a new graph each time.
+        first, second = app.render_analysis(self.MAP_RESULT)[0], app.render_analysis(self.MAP_RESULT)[0]
+        self.assertNotEqual(first.key, second.key)
+        self.assertEqual(first.children.figure.data[0].type, 'scattergeo')
+        histogram = dict(self.MAP_RESULT, chart='histogram', points=[dict(x=200, x0=190, x1=210, y=1)])
+        self.assertEqual(app.render_analysis(histogram)[0].children.figure.data[0].type, 'bar')
 
     def test_region_chart_uses_the_analysis_engine(self):
         result = {'status': 'ok', 'n_profiles': 2, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'series': []}
