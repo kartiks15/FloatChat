@@ -3,6 +3,7 @@ from datetime import datetime
 from unittest.mock import patch
 from dash import no_update
 import app
+from database import QueryLimitError
 
 
 class DashboardTests(unittest.TestCase):
@@ -159,6 +160,25 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('1,234', str(kpis))
         self.assertIn('98,765', str(kpis))
         self.assertIn('2026-10-12', str(kpis))
+
+    def test_region_highlight_builds_validated_filter(self):
+        self.assertEqual(app.region_highlight(1, 'equator', [6, 3]),
+                         ({'filter': {'region': 'equator', 'months': [3, 6]}, 'label': '5°S–5°N · Mar, Jun'}, ''))
+        self.assertEqual(app.region_highlight(1, 'pacific', None), (no_update, 'Choose a region from the list.'))
+
+    def test_region_chart_calls_aggregate_and_highlights(self):
+        spec = {'n_profiles': 2, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'rows': []}
+        with patch('app.aggregate_measurements', return_value=spec) as aggregate:
+            chart, highlight, feedback = app.region_chart(1, 'equator', [3, 4, 5, 6], 'temp', 'month_of_year')
+        aggregate.assert_called_once_with(region='equator', months=[3, 4, 5, 6], variable='temp', group_by='month_of_year')
+        self.assertEqual((chart, highlight['label'], feedback), (spec, '5°S–5°N', ''))
+
+    def test_region_chart_reports_errors_without_details(self):
+        with patch('app.aggregate_measurements', side_effect=QueryLimitError('Result exceeds 1000 rows')):
+            self.assertEqual(app.region_chart(1, 'equator', [], 'temp', 'week')[:2], (no_update, no_update))
+        with patch('app.aggregate_measurements', side_effect=RuntimeError('password=secret')):
+            feedback = app.region_chart(1, 'equator', [], 'temp', 'week')[2]
+        self.assertNotIn('secret', feedback)
 
 
 if __name__ == '__main__':

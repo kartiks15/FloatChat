@@ -25,9 +25,11 @@ from flask import request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 from dotenv import load_dotenv
 
-from database import fetch_rows
-from chat_service import answer_question, ai_enabled, user_keys_allowed, openrouter_models, MAX_QUERY_CHARS
-from ocean_tools import MONTH_NAMES, region_points
+from database import QueryLimitError, fetch_rows
+from chat_service import (answer_question, ai_enabled, dashboard_actions, user_keys_allowed, openrouter_models,
+                          MAX_QUERY_CHARS)
+from ocean_tools import (MONTH_NAMES, REGIONS, VARIABLES, RegionFilter, ToolPlan, aggregate_measurements,
+                         describe_filter, filter_dict, region_points)
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -487,6 +489,40 @@ def ai_settings():
     ], className="ai-settings", id="ai-settings", hidden=not useful)
 
 
+REGION_LABELS = {"equator": "Equator (5°S–5°N)", "arabian_sea": "Arabian Sea", "bay_of_bengal": "Bay of Bengal"}
+GROUP_OPTIONS = [("month_of_year", "By calendar month"), ("month", "By month"), ("week", "By week"),
+                 ("pressure", "By depth")]
+
+
+def field(label, control_id, control):
+    return html.Div([html.Label(label, htmlFor=control_id, className="field-label"), control], className="field")
+
+
+def regions_pane():
+    """Highlight and chart a region from fixed choices; the same operations the assistant uses."""
+    dropdown = dict(clearable=False, searchable=False, className="dd")
+    return html.Div([
+        html.P("Highlight every profile in a region, or chart the average of a measurement across them. "
+               "No AI key needed.", className="field-help"),
+        field("Region", "region-select", dcc.Dropdown(
+            id="region-select", options=[{"label": REGION_LABELS[key], "value": key} for key in REGIONS],
+            value="equator", **dropdown)),
+        field("Months", "months-select", dcc.Dropdown(
+            id="months-select", options=[{"label": name, "value": i + 1} for i, name in enumerate(MONTH_NAMES)],
+            multi=True, placeholder="All months", searchable=False, className="dd")),
+        field("Measurement", "variable-select", dcc.Dropdown(
+            id="variable-select", options=[{"label": label, "value": key} for key, (_, label, _) in VARIABLES.items()],
+            value="temp", **dropdown)),
+        field("Chart", "group-select", dcc.Dropdown(
+            id="group-select", options=[{"label": label, "value": value} for value, label in GROUP_OPTIONS],
+            value="month_of_year", **dropdown)),
+        html.Div([html.Button("Highlight", id="region-highlight-btn", n_clicks=0, className="btn btn-ghost"),
+                  html.Button("Chart average", id="region-chart-btn", n_clicks=0, className="btn btn-primary")],
+                 className="region-actions"),
+        html.Div(id="region-feedback", className="field-help", role="status"),
+    ], id="pane-regions", className="pane is-hidden")
+
+
 # ── Layout ──────────────────────────────────────────────────
 # The map is a full-screen canvas; panels float over it on wide screens and
 # stack below it on narrow ones (see assets/style.css).
@@ -520,6 +556,7 @@ app.layout = html.Div([
                 html.Div([
                     html.Button([icon("list"), "Floats"], id="tab-floats", n_clicks=0,
                                 className="tab is-active", role="tab"),
+                    html.Button([icon("pin"), "Regions"], id="tab-regions", n_clicks=0, className="tab", role="tab"),
                     html.Button([icon("sparkle"), "Ask AI"], id="tab-chat", n_clicks=0, className="tab", role="tab"),
                 ], id="tabs", className="tabs", role="tablist"),
 
@@ -530,6 +567,8 @@ app.layout = html.Div([
                     html.Div(id="float-count", className="list-caption"),
                     html.Div(skeleton_rows(), id="float-list", className="float-list"),
                 ], id="pane-floats", className="pane"),
+
+                regions_pane(),
 
                 html.Div([
                     ai_settings(),
@@ -789,6 +828,50 @@ def clear_highlight(n_clicks):
 
 
 @app.callback(
+    Output("map-highlight", "data", allow_duplicate=True),
+    Output("region-feedback", "children"),
+    Input("region-highlight-btn", "n_clicks"),
+    State("region-select", "value"),
+    State("months-select", "value"),
+    prevent_initial_call=True,
+)
+def region_highlight(n_clicks, region, months):
+    try:
+        f = RegionFilter(region=region, months=months or None)
+    except ValueError:
+        return no_update, "Choose a region from the list."
+    return {"filter": filter_dict(f), "label": describe_filter(f)}, ""
+
+
+@app.callback(
+    Output("analysis", "data", allow_duplicate=True),
+    Output("map-highlight", "data", allow_duplicate=True),
+    Output("region-feedback", "children", allow_duplicate=True),
+    Input("region-chart-btn", "n_clicks"),
+    State("region-select", "value"),
+    State("months-select", "value"),
+    State("variable-select", "value"),
+    State("group-select", "value"),
+    prevent_initial_call=True,
+    running=[(Output("region-chart-btn", "disabled"), True, False)],
+)
+def region_chart(n_clicks, region, months, variable, group_by):
+    args = {key: value for key, value in dict(region=region, months=months or None, variable=variable,
+                                              group_by=group_by).items() if value is not None}
+    try:
+        result = aggregate_measurements(**args)
+    except QueryLimitError:
+        return no_update, no_update, "Too many points to chart. Choose fewer months or group by calendar month."
+    except ValueError:
+        return no_update, no_update, "Choose a region from the list."
+    except Exception as exc:
+        log.warning("Regional average unavailable (%s)", type(exc).__name__)
+        return no_update, no_update, "Couldn't compute that average. Try again in a minute."
+    actions = dashboard_actions(ToolPlan(tool="aggregate_measurements", arguments={}), result) or {}
+    return actions.get("chart", no_update), actions.get("highlight", no_update), ""
+
+
+@app.callback(
     Output("analysis-chart", "figure"),
     Output("analysis-title", "children"),
     Output("analysis-caption", "children"),
@@ -914,17 +997,21 @@ def use_suggestion(clicks):
 # Tabs switch in the browser; no server round trip. The tablist class moves the sliding indicator.
 clientside_callback(
     """
-    function(floatsClicks, chatClicks) {
-        const chat = (dash_clientside.callback_context.triggered[0] || {}).prop_id === "tab-chat.n_clicks";
-        return [chat ? "tabs is-chat" : "tabs",
-                chat ? "tab" : "tab is-active", chat ? "tab is-active" : "tab",
-                chat ? "pane is-hidden" : "pane", chat ? "pane" : "pane is-hidden"];
+    function(floatsClicks, regionsClicks, chatClicks) {
+        const id = ((dash_clientside.callback_context.triggered[0] || {}).prop_id || "").split(".")[0];
+        const tab = id === "tab-chat" ? "chat" : id === "tab-regions" ? "regions" : "floats";
+        const pick = (name, yes, no) => (tab === name ? yes : no);
+        return [tab === "floats" ? "tabs" : "tabs is-" + tab,
+                pick("floats", "tab is-active", "tab"), pick("regions", "tab is-active", "tab"),
+                pick("chat", "tab is-active", "tab"),
+                pick("floats", "pane", "pane is-hidden"), pick("regions", "pane", "pane is-hidden"),
+                pick("chat", "pane", "pane is-hidden")];
     }
     """,
     Output("tabs", "className"),
-    Output("tab-floats", "className"), Output("tab-chat", "className"),
-    Output("pane-floats", "className"), Output("pane-chat", "className"),
-    Input("tab-floats", "n_clicks"), Input("tab-chat", "n_clicks"),
+    Output("tab-floats", "className"), Output("tab-regions", "className"), Output("tab-chat", "className"),
+    Output("pane-floats", "className"), Output("pane-regions", "className"), Output("pane-chat", "className"),
+    Input("tab-floats", "n_clicks"), Input("tab-regions", "n_clicks"), Input("tab-chat", "n_clicks"),
     prevent_initial_call=True,
 )
 
