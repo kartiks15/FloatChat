@@ -11,6 +11,12 @@ from ocean_tools import execute_tool, SearchArgs
 
 
 class ChatTests(unittest.TestCase):
+    def setUp(self):
+        # Planning reads data coverage; no chat unit test may reach a real database.
+        patcher = patch('chat_service.data_coverage', side_effect=RuntimeError('no database in unit tests'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_disabled_chat_never_calls_provider(self):
         with patch.dict(os.environ, {'AI_ENABLED': 'false'}), patch('chat_service.generate') as generate:
             response, selection = chat.answer_question('List floats')
@@ -49,10 +55,10 @@ class ChatTests(unittest.TestCase):
         with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \
              patch('chat_service.generate', side_effect=['{"tool":"profile_data","arguments":{"profile_id":1}}', 'Temperature is 20 C.']) as model, \
              patch('chat_service.execute_tool', return_value={'profile': {'profile_id': 1, 'wmo_id': '2902115'}, 'rows': [{'temp': 20}]}):
-            answer, selection = chat.answer_question('Show profile 1')
+            answer, actions = chat.answer_question('Show profile 1')
             self.assertEqual(model.call_count, 2)
             self.assertIn('20', model.call_args.args[1])
-            self.assertEqual(selection['profile_id'], 1)
+            self.assertEqual(actions['select']['profile_id'], 1)
             self.assertIn('20', answer)
 
     def test_limits_and_redacts_errors(self):
@@ -66,6 +72,16 @@ class ChatTests(unittest.TestCase):
         result = json.loads(chat.bounded_context({'rows': [{'text': 'x' * 500} for _ in range(100)], 'truncated': False}))
         self.assertTrue(result['context_sampled'])
         self.assertEqual(result['returned_rows'], 100)
+
+    def test_context_bounds_analysis_points_too(self):
+        # Analysis results carry their data in points and series[].points, not rows.
+        result = {'status': 'ok', 'chart': 'scatter', 'points': [{'x': 35.0 + i / 1e4, 'y': 28.0, 'pres': i} for i in range(5000)],
+                  'series': [{'name': 'A', 'points': [{'x': f'2024-{i:04d}', 'y': 28.0, 'n_profiles': 3} for i in range(1000)]}]}
+        text = chat.bounded_context(result)
+        context = json.loads(text)
+        self.assertLessEqual(len(text), chat.MAX_CONTEXT_CHARS)
+        self.assertTrue(context['context_sampled'])
+        self.assertGreater(len(context['series'][0]['points']), 0)
 
     def test_ollama_request_uses_native_api_and_no_openai_key(self):
         response = MagicMock()
@@ -129,6 +145,82 @@ class ChatTests(unittest.TestCase):
                 chat.reserve_request('visitor', shared=False)
             with self.assertRaises(chat.QuotaExceeded):
                 chat.reserve_request('visitor')
+
+    def test_dashboard_actions_for_each_tool(self):
+        plan = lambda tool: chat.ToolPlan(tool=tool, arguments={})
+        region = {'n_profiles': 3, 'filter': {'region': 'equator'}, 'label': '5°S–5°N'}
+        aggregate = {'status': 'ok', 'n_profiles': 3, 'filter': {'region': 'equator'}, 'filter_label': '5°S–5°N', 'series': []}
+        self.assertEqual(chat.dashboard_actions(plan('region_profiles'), region),
+                         {'highlight': {'filter': {'region': 'equator'}, 'label': '5°S–5°N'}})
+        actions = chat.dashboard_actions(plan('analyze'), aggregate)
+        self.assertEqual((actions['chart'], actions['highlight']['label']), (aggregate, '5°S–5°N'))
+        self.assertEqual(chat.dashboard_actions(plan('trajectory'), {'rows': [{'profile_id': 7, 'wmo_id': '1'}]}),
+                         {'select': {'profile_id': 7, 'wmo_id': '1'}})
+        self.assertIsNone(chat.dashboard_actions(plan('dataset_summary'), {'floats': 2}))
+
+    def test_empty_region_result_clears_the_old_highlight(self):
+        # A stale highlight of an earlier region next to "no measurements" would mislead.
+        plan = chat.ToolPlan(tool='analyze', arguments={})
+        empty = {'status': 'no_data', 'n_profiles': 0, 'filter': {}, 'filter_label': 'All profiles', 'series': []}
+        self.assertEqual(chat.dashboard_actions(plan, empty), {'chart': empty, 'highlight': None})
+        self.assertEqual(chat.dashboard_actions(chat.ToolPlan(tool='region_profiles', arguments={}),
+                                                {'n_profiles': 0, 'filter': {}, 'label': 'x'}), {'highlight': None})
+
+    def test_prompts_describe_regions_and_dashboard(self):
+        with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \
+             patch('chat_service.generate', side_effect=['{"tool":"region_profiles","arguments":{"region":"equator"}}', 'Three.']) as model, \
+             patch('chat_service.execute_tool', return_value={'n_profiles': 3, 'filter': {'region': 'equator'}, 'label': '5°S–5°N'}):
+            answer, actions = chat.answer_question('Highlight floats on the equator')
+        plan_prompt, answer_prompt = model.call_args_list[0].args[0], model.call_args_list[1].args[0]
+        self.assertIn('March to June', plan_prompt)
+        self.assertIn('5°S–5°N', plan_prompt)
+        self.assertNotIn('claim a map was changed', answer_prompt)
+        self.assertIn('dashboard', answer_prompt)
+        self.assertEqual(actions['highlight']['label'], '5°S–5°N')
+
+    def test_analyze_and_unsupported_actions(self):
+        plan = lambda tool: chat.ToolPlan(tool=tool, arguments={})
+        result = {'status': 'ok', 'n_profiles': 3, 'filter': {'region': 'equator'}, 'filter_label': 'Equator', 'series': []}
+        self.assertEqual(chat.dashboard_actions(plan('analyze'), result),
+                         {'chart': result, 'highlight': {'filter': {'region': 'equator'}, 'label': 'Equator'}})
+        compared = dict(result, filter=None)
+        self.assertIsNone(chat.dashboard_actions(plan('analyze'), compared)['highlight'])
+        refused = execute_tool('unsupported', {'reason': 'Mixed-layer depth is not available.'})
+        self.assertEqual(chat.dashboard_actions(plan('unsupported'), refused), {'chart': refused})
+        self.assertEqual(refused['status'], 'unsupported')
+
+    def test_invalid_plan_is_repaired_once(self):
+        good = {'status': 'ok', 'n_profiles': 1, 'filter': {}, 'filter_label': 'All profiles', 'series': []}
+        with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \
+             patch('chat_service.coverage_sentence', return_value='This database has 20 floats.'), \
+             patch('chat_service.data_coverage', return_value={}), \
+             patch('chat_service.generate', side_effect=['{"tool":"analyze","arguments":{"measure":"profiles"}}',
+                                                         '{"tool":"analyze","arguments":{"measure":"profiles","stat":"count","group_by":"year"}}',
+                                                         'One profile.']) as model, \
+             patch('chat_service.execute_tool', side_effect=[ValueError('Profile counts use stat count.'), good]):
+            answer, actions = chat.answer_question('How many profiles per year?')
+        self.assertEqual(model.call_count, 3)
+        self.assertIn('YOUR PREVIOUS PLAN WAS INVALID: Profile counts use stat count.', model.call_args_list[1].args[1])
+        self.assertIn('Data coverage: This database has 20 floats.', model.call_args_list[0].args[0])
+        self.assertEqual((answer, actions['chart']), ('One profile.', good))
+
+    def test_second_invalid_plan_gives_up_politely(self):
+        with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \
+             patch('chat_service.generate', side_effect=['not json', '{"tool":"query_data","arguments":{}}']) as model:
+            answer, actions = chat.answer_question('Draw something')
+        self.assertEqual(model.call_count, 2)
+        self.assertTrue(answer.startswith("I couldn't turn that into a supported analysis. I can chart"))
+        self.assertIsNone(actions)
+
+    def test_prompts_cover_charts_and_honesty(self):
+        with patch.dict(os.environ, {'AI_ENABLED': 'true'}), patch('chat_service.reserve_request'), \
+             patch('chat_service.generate', side_effect=['{"tool":"unsupported","arguments":{"reason":"No forecasts."}}',
+                                                         'Sorry.']) as model:
+            chat.answer_question('Forecast next year')
+        plan_prompt, answer_prompt = model.call_args_list[0].args[0], model.call_args_list[1].args[0]
+        self.assertIn('pacific_ocean', plan_prompt)
+        self.assertIn('use unsupported with a short reason', plan_prompt)
+        self.assertIn('for no_data give the diagnosis', answer_prompt)
 
     def test_bedrock_converse_request(self):
         client = MagicMock()

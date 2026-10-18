@@ -17,7 +17,6 @@ charset-normalizer==3.5.2
 click==8.5.0
 cryptography==50.0.2
 dash==3.4.0
-dash-bootstrap-components==2.0.4
 gunicorn==23.0.0; sys_platform != "win32"
 h11==0.16.0
 httpcore==1.0.9

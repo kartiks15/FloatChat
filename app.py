@@ -17,7 +17,9 @@ Run:
 import logging
 import math
 import os
+import uuid
 
+from pydantic import ValidationError
 from dash import Dash, dcc, html, Input, Output, State, ctx, no_update, ALL, Patch, clientside_callback
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -26,7 +28,14 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from dotenv import load_dotenv
 
 from database import fetch_rows
-from chat_service import answer_question, ai_enabled, user_keys_allowed, openrouter_models, MAX_QUERY_CHARS
+from chat_service import (answer_question, ai_enabled, dashboard_actions, user_keys_allowed, openrouter_models,
+                          MAX_QUERY_CHARS)
+from theme import (ACCENT, AXIS, BASE_LAYOUT, BORDER, COLORS, FONT, HIGHLIGHT, INK, INK_2, MONO, MUTED,  # noqa: F401
+                   PRESSURE_SCALE, PROFILE_DOT, SURFACE_2, placeholder_figure)
+from analysis import MEASURES, run_analysis
+from charts import build_chart, describe_result
+from ocean_tools import (MONTH_NAMES, REGIONS, RegionFilter, ToolPlan, describe_filter, filter_dict,  # noqa: F401
+                         region_points)
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -64,6 +73,13 @@ def get_float_list():
         GROUP BY f.wmo_id, f.dac ORDER BY n_profiles DESC, f.wmo_id LIMIT 500""")
 
 
+def get_totals():
+    """True dataset totals for the top bar (the float list is capped at 500)."""
+    rows = db_query("""SELECT (SELECT COUNT(*) FROM floats) AS floats, COUNT(*) AS profiles,
+        MAX(date_utc) AS latest FROM profiles""")
+    return rows[0] if rows else {"floats": 0, "profiles": 0, "latest": None}
+
+
 def fmt_date(value):
     return str(value)[:10] if value else "—"
 
@@ -74,46 +90,18 @@ def fmt_position(lat, lon):
     return f"{abs(lat):.2f}°{'N' if lat >= 0 else 'S'}, {abs(lon):.2f}°{'E' if lon >= 0 else 'W'}"
 
 
-# ── Design tokens (mirrored in assets/style.css) ───────────
-FONT = "Geist, system-ui, -apple-system, 'Segoe UI', sans-serif"
-MONO = "'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace"
-SURFACE_2 = "#232327"
-BORDER = "#2e2e33"
-GRID = "#26262b"
-INK = "#f4f4f5"
-INK_2 = "#a1a1aa"
-MUTED = "#8b8b94"
-ACCENT = "#34d399"          # the one UI accent (emerald)
-PROFILE_DOT = "#a1a1aa"
-# Data series, validated with the dataviz palette checks against the #18181b panel surface.
-COLORS = {"temp": "#d95926", "psal": "#3987e5", "doxy": "#3987e5",
-          "chla": "#199e70", "nitrate": "#c98500", "bbp700": "#d55181"}
-PRESSURE_SCALE = [[0, "#b7d3f6"], [0.5, "#5598e7"], [1, "#1c5cab"]]  # one hue, shallow → deep
+# ── Design tokens: theme.py (mirrored in assets/style.css) ──
+# Map trace slots: the highlight sits above the grey dots and below the selection.
+TRACE_PROFILES, TRACE_HIGHLIGHT, TRACE_TRAJECTORY, TRACE_HALO, TRACE_DOT = range(5)
 BGC_VARIABLES = [("doxy", "Oxygen (µmol/kg)"), ("chla", "Chlorophyll-a (mg/m³)"),
                  ("nitrate", "Nitrate (µmol/kg)"), ("bbp700", "Backscatter 700 nm (m⁻¹)")]
 # On wide screens the map sits under a 340 px left panel and a 420 px right panel;
 # shifting the centre by half the difference frames data in the visible gap.
 PANEL_OFFSET_PX = 40
 
-AXIS = dict(gridcolor=GRID, linecolor=BORDER, zeroline=False,
-            tickfont=dict(family=MONO, color=MUTED, size=10), title=dict(font=dict(color=INK_2, size=12)))
-BASE_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family=FONT, color=INK_2, size=12),
-    margin=dict(l=56, r=16, t=36, b=44),
-    hoverlabel=dict(bgcolor=SURFACE_2, bordercolor=BORDER, font=dict(family=FONT, color=INK, size=12)),
-)
 
 
 # ── Figures ────────────────────────────────────────────────
-def placeholder_figure(message, height=200):
-    fig = go.Figure()
-    fig.update_layout(**BASE_LAYOUT, height=height, xaxis=dict(visible=False), yaxis=dict(visible=False))
-    fig.add_annotation(text=message, x=0.5, y=0.5, xref="paper", yref="paper",
-                       showarrow=False, font=dict(color=MUTED, size=13))
-    return fig
-
-
 def style_subplots(fig, height):
     fig.update_xaxes(**AXIS)
     fig.update_yaxes(**AXIS, autorange="reversed")
@@ -155,8 +143,17 @@ def selection_traces(meta):
                           marker=dict(size=10, color=ACCENT))]
 
 
-def build_map(profiles, selected_wmo=None, trajectory=None, selected=None):
-    """Trace order is fixed (profiles, trajectory, halo, dot) so selection can be patched."""
+def highlight_trace(points):
+    return go.Scattermap(
+        lat=[p["latitude"] for p in points], lon=[p["longitude"] for p in points], mode="markers",
+        marker=dict(size=9, color=HIGHLIGHT, opacity=0.9), name="Highlighted",
+        customdata=[[p["profile_id"], p["wmo_id"]] for p in points],
+        text=[f"WMO {p['wmo_id']} · {fmt_date(p['date_utc'])}<br>Highlighted" for p in points],
+        hovertemplate="%{text}<extra></extra>")
+
+
+def build_map(profiles, selected_wmo=None, trajectory=None, selected=None, highlight=None):
+    """Trace order is fixed (see TRACE_*) so the highlight and selection can be patched."""
     lats = [p["latitude"] for p in profiles]
     lons = [p["longitude"] for p in profiles]
     texts = []
@@ -169,11 +166,14 @@ def build_map(profiles, selected_wmo=None, trajectory=None, selected=None):
         marker=dict(size=7, color=PROFILE_DOT, opacity=0.55),
         text=texts, hovertemplate="%{text}<extra></extra>",
         customdata=[[p["profile_id"], p["wmo_id"]] for p in profiles]))
+    fig.add_trace(highlight_trace(highlight or []))
     traj = trajectory if trajectory is not None else (get_trajectory(selected_wmo) if selected_wmo else [])
     fig.add_trace(trajectory_trace(traj))
     fig.add_traces(selection_traces(selected))
     if traj:
         center, zoom = map_view([t["latitude"] for t in traj], [t["longitude"] for t in traj])
+    elif highlight:
+        center, zoom = map_view([p["latitude"] for p in highlight], [p["longitude"] for p in highlight])
     else:
         center, zoom = map_view(lats, lons)
     fig.update_layout(**BASE_LAYOUT)
@@ -304,7 +304,9 @@ def security_headers(response):
 
 
 # ── Components ──────────────────────────────────────────────
-SUGGESTIONS = ["Summarise the dataset", "List floats from INCOIS", "Profiles near 12°N 72°E"]
+SUGGESTIONS = ["Summarise the dataset", "List floats from INCOIS", "Profiles near 12°N 72°E",
+               "Compare oxygen in the Arabian Sea and Bay of Bengal by month",
+               "Mean temperature in the Pacific Ocean"]
 
 
 def icon(name, extra=""):
@@ -406,6 +408,56 @@ def ai_settings():
     ], className="ai-settings", id="ai-settings", hidden=not useful)
 
 
+REGION_OPTIONS = [{"label": box["label"] + (" (approx.)" if box["approximate"] else ""), "value": key}
+                  for key, box in REGIONS.items()]
+STAT_OPTIONS = [("mean", "Mean"), ("median", "Median"), ("min", "Minimum"), ("max", "Maximum"),
+                ("std", "Standard deviation"), ("count", "Count"), ("p10", "10th percentile"), ("p90", "90th percentile")]
+GROUP_OPTIONS = [("none", "None (one value)"), ("day", "By day"), ("week", "By week"), ("month", "By month"),
+                 ("year", "By year"), ("month_of_year", "By calendar month"), ("depth", "By depth"),
+                 ("float", "By float"), ("lat_band", "By latitude band"), ("lon_band", "By longitude band")]
+CHART_OPTIONS = [("auto", "Automatic"), ("line", "Line"), ("bar", "Bar"), ("scatter", "Scatter"),
+                 ("histogram", "Histogram"), ("profile", "Depth profile"), ("map", "Map")]
+
+
+def options(pairs):
+    return [{"label": label, "value": value} for value, label in pairs]
+
+
+def field(label, control_id, control):
+    return html.Div([html.Label(label, htmlFor=control_id, className="field-label"), control], className="field")
+
+
+def regions_pane():
+    """Every analysis option from dropdowns: the same engine the assistant uses, no AI needed."""
+    dropdown = dict(clearable=False, searchable=False, className="dd")
+    measurements = [(key, label) for key, (_, label, _) in MEASURES.items() if key != "profiles"]
+    return html.Div([
+        html.P("Chart any statistic for a region, or highlight its profiles. No AI key needed.",
+               className="field-help"),
+        field("Region", "region-select", dcc.Dropdown(id="region-select", options=REGION_OPTIONS,
+                                                      value="equator", **dropdown)),
+        field("Months", "months-select", dcc.Dropdown(
+            id="months-select", options=[{"label": name, "value": i + 1} for i, name in enumerate(MONTH_NAMES)],
+            multi=True, placeholder="All months", searchable=False, className="dd")),
+        field("Measurement", "variable-select", dcc.Dropdown(
+            id="variable-select", options=options(measurements + [("profiles", "Profile count")]),
+            value="temp", **dropdown)),
+        field("Statistic", "stat-select", dcc.Dropdown(id="stat-select", options=options(STAT_OPTIONS),
+                                                       value="mean", **dropdown)),
+        field("Group by", "group-select", dcc.Dropdown(id="group-select", options=options(GROUP_OPTIONS),
+                                                       value="month_of_year", **dropdown)),
+        field("Chart", "chart-select", dcc.Dropdown(id="chart-select", options=options(CHART_OPTIONS),
+                                                    value="auto", **dropdown)),
+        field("Against (scatter)", "x-measure-select", dcc.Dropdown(
+            id="x-measure-select", options=options(measurements), value=None, clearable=True, searchable=False,
+            placeholder="Second measurement", className="dd")),
+        html.Div([html.Button("Highlight", id="region-highlight-btn", n_clicks=0, className="btn btn-ghost"),
+                  html.Button("Chart", id="region-chart-btn", n_clicks=0, className="btn btn-primary")],
+                 className="region-actions"),
+        html.Div(id="region-feedback", className="field-help", role="status"),
+    ], id="pane-regions", className="pane is-hidden")
+
+
 # ── Layout ──────────────────────────────────────────────────
 # The map is a full-screen canvas; panels float over it on wide screens and
 # stack below it on narrow ones (see assets/style.css).
@@ -415,6 +467,8 @@ app.layout = html.Div([
     dcc.Store(id="selected-wmo", data=None),
     dcc.Store(id="float-data", data=None),   # None while loading, {"error": ...} on failure
     dcc.Store(id="chat-selection", data=None),
+    dcc.Store(id="map-highlight", data=None),   # {"filter": RegionFilter fields, "label": str}
+    dcc.Store(id="analysis", data=None),        # an analysis.run_analysis result to chart
     dcc.Store(id="api-key-store", storage_type="session"),
     dcc.Store(id="server-ai", data={"enabled": ai_enabled()}),
     dcc.Store(id="scroll-sink"),
@@ -437,6 +491,7 @@ app.layout = html.Div([
                 html.Div([
                     html.Button([icon("list"), "Floats"], id="tab-floats", n_clicks=0,
                                 className="tab is-active", role="tab"),
+                    html.Button([icon("pin"), "Analyze"], id="tab-regions", n_clicks=0, className="tab", role="tab"),
                     html.Button([icon("sparkle"), "Ask AI"], id="tab-chat", n_clicks=0, className="tab", role="tab"),
                 ], id="tabs", className="tabs", role="tablist"),
 
@@ -447,6 +502,8 @@ app.layout = html.Div([
                     html.Div(id="float-count", className="list-caption"),
                     html.Div(skeleton_rows(), id="float-list", className="float-list"),
                 ], id="pane-floats", className="pane"),
+
+                regions_pane(),
 
                 html.Div([
                     ai_settings(),
@@ -488,9 +545,22 @@ app.layout = html.Div([
                 ], className="period"),
             ], className="toolbar glass reveal", style={"--d": 160}),
             html.Div([
-                html.Div(status_chip("Connecting", "idle"), id="db-status", className="status"),
-                html.Div("Click a dot to inspect a profile", className="hint"),
-            ], className="statusbar glass reveal", style={"--d": 240}),
+                html.Section([
+                    html.Div([html.H3(id="analysis-title", className="chart-title"),
+                              html.Button("Close", id="close-analysis", n_clicks=0, className="btn btn-ghost btn-sm")],
+                             className="analysis-head"),
+                    html.P(id="analysis-message", className="analysis-message"),
+                    html.Div(id="analysis-figure"),   # a fresh graph per result (see analysis_graph)
+                    html.P(id="analysis-caption", className="field-help"),
+                ], id="analysis-panel", className="analysis glass", hidden=True),
+                html.Div([
+                    html.Div(status_chip("Connecting", "idle"), id="db-status", className="status"),
+                    html.Div([html.Span(className="highlight-swatch"), html.Span(id="highlight-label"),
+                              html.Button("Clear", id="clear-highlight", n_clicks=0, className="btn btn-ghost btn-sm")],
+                             id="highlight-chip", className="highlight-chip", hidden=True),
+                    html.Div("Click a dot to inspect a profile", className="hint"),
+                ], className="statusbar glass reveal", style={"--d": 240}),
+            ], className="center-bottom"),
         ], className="col-center"),
 
         # Right column: inspector
@@ -538,8 +608,9 @@ app.layout = html.Div([
     Input("date-filter", "value"),
     State("selected-wmo", "data"),
     State("selected-profile", "data"),
+    State("map-highlight", "data"),
 )
-def load_data(date_filter, selected_wmo=None, selected_profile=None):
+def load_data(date_filter, selected_wmo=None, selected_profile=None, highlight=None):
     # Relative to the dataset's latest measurement so historical samples remain useful.
     if date_filter not in ("all", "30", "90", "180", "365"):
         date_filter = "all"
@@ -554,8 +625,11 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None):
             AND longitude BETWEEN -180 AND 180 {date_clause}
             ORDER BY date_utc DESC NULLS LAST, profile_id DESC LIMIT {MAP_PROFILE_LIMIT}""", params)
         floats = get_float_list()
+        totals = get_totals()
         trajectory = get_trajectory(selected_wmo) if selected_wmo else []
         selected = get_profile_meta(selected_profile) if selected_profile else None
+        # The highlight shows its own filter, independent of the period.
+        highlighted = region_points(**highlight["filter"])["rows"] if highlight else []
     except Exception as exc:
         log.warning("Data unavailable (%s)", type(exc).__name__)
         return ({"error": "database"}, build_map([]), status_chip("Database unavailable", "error"),
@@ -570,11 +644,10 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None):
             status += " (latest shown)"
     else:
         status = "No profiles in this period"
-    latest = max((f["last"] for f in float_data if f["last"]), default=None)
-    kpis = [kpi(f"{len(float_data):,}", "floats"),
-            kpi(f"{sum(f['n_profiles'] for f in float_data):,}", "profiles"),
-            kpi(latest or "—", "latest")]
-    return float_data, build_map(profiles, selected_wmo, trajectory, selected), status_chip(status, "live"), kpis
+    kpis = [kpi(f"{totals['floats']:,}", "floats"), kpi(f"{totals['profiles']:,}", "profiles"),
+            kpi(fmt_date(totals["latest"]), "latest")]
+    return (float_data, build_map(profiles, selected_wmo, trajectory, selected, highlighted),
+            status_chip(status, "live"), kpis)
 
 
 @app.callback(
@@ -642,15 +715,133 @@ def update_map_selection(wmo_id, profile_id):
     except Exception:
         return no_update
     patch = Patch()
-    patch["data"][1] = trajectory_trace(traj).to_plotly_json()
+    patch["data"][TRACE_TRAJECTORY] = trajectory_trace(traj).to_plotly_json()
     halo, dot = selection_traces(meta)
-    patch["data"][2] = halo.to_plotly_json()
-    patch["data"][3] = dot.to_plotly_json()
-    if "selected-wmo.data" in ctx.triggered_prop_ids and traj:
+    patch["data"][TRACE_HALO] = halo.to_plotly_json()
+    patch["data"][TRACE_DOT] = dot.to_plotly_json()
+    if traj and "selected-wmo.data" in ctx.triggered_prop_ids:
         center, zoom = map_view([t["latitude"] for t in traj], [t["longitude"] for t in traj])
         patch["layout"]["map"]["center"] = center
         patch["layout"]["map"]["zoom"] = zoom
     return patch
+
+
+@app.callback(
+    Output("main-map", "figure", allow_duplicate=True),
+    Output("highlight-label", "children"),
+    Output("highlight-chip", "hidden"),
+    Input("map-highlight", "data"),
+    prevent_initial_call=True,
+)
+def update_highlight(highlight):
+    """Patch only the highlight trace and frame the map to it."""
+    try:
+        result = region_points(**highlight["filter"]) if highlight else {"rows": [], "truncated": False}
+    except Exception as exc:
+        log.warning("Highlight unavailable (%s)", type(exc).__name__)
+        return no_update, no_update, no_update
+    points = result["rows"]
+    patch = Patch()
+    patch["data"][TRACE_HIGHLIGHT] = highlight_trace(points).to_plotly_json()
+    if points:
+        center, zoom = map_view([p["latitude"] for p in points], [p["longitude"] for p in points])
+        patch["layout"]["map"]["center"] = center
+        patch["layout"]["map"]["zoom"] = zoom
+    if not highlight:
+        return patch, "", True
+    count = f"{len(points):,} profile{'' if len(points) == 1 else 's'}"
+    return patch, f"{highlight['label']} · {count}" + (" (latest 5,000)" if result["truncated"] else ""), False
+
+
+@app.callback(
+    Output("map-highlight", "data", allow_duplicate=True),
+    Input("clear-highlight", "n_clicks"),
+    prevent_initial_call=True,
+)
+def clear_highlight(n_clicks):
+    return None
+
+
+@app.callback(
+    Output("map-highlight", "data", allow_duplicate=True),
+    Output("region-feedback", "children"),
+    Input("region-highlight-btn", "n_clicks"),
+    State("region-select", "value"),
+    State("months-select", "value"),
+    prevent_initial_call=True,
+)
+def region_highlight(n_clicks, region, months):
+    try:
+        f = RegionFilter(region=region, months=months or None)
+    except ValueError:
+        return no_update, "Choose a region from the list."
+    return {"filter": filter_dict(f), "label": describe_filter(f)}, ""
+
+
+@app.callback(
+    Output("analysis", "data", allow_duplicate=True),
+    Output("map-highlight", "data", allow_duplicate=True),
+    Output("region-feedback", "children", allow_duplicate=True),
+    Input("region-chart-btn", "n_clicks"),
+    State("region-select", "value"),
+    State("months-select", "value"),
+    State("variable-select", "value"),
+    State("group-select", "value"),
+    State("stat-select", "value"),
+    State("chart-select", "value"),
+    State("x-measure-select", "value"),
+    prevent_initial_call=True,
+    running=[(Output("region-chart-btn", "disabled"), True, False)],
+)
+def region_chart(n_clicks, region, months, measure, group_by, stat="mean", chart="auto", x_measure=None):
+    args = {key: value for key, value in dict(region=region, months=months or None, measure=measure,
+                                              group_by=group_by, stat=stat, chart=chart,
+                                              x_measure=x_measure).items() if value is not None}
+    try:
+        result = run_analysis(**args)   # too much or too little data comes back as a status, not an error
+    except ValidationError as exc:
+        reason = exc.errors()[0]["msg"].removeprefix("Value error, ")
+        return no_update, no_update, f"That combination isn't supported: {reason}"
+    except ValueError:
+        return no_update, no_update, "Choose a region from the list."
+    except Exception as exc:
+        log.warning("Regional analysis unavailable (%s)", type(exc).__name__)
+        return no_update, no_update, "Couldn't compute that. Try again in a minute."
+    actions = dashboard_actions(ToolPlan(tool="analyze", arguments={}), result) or {}
+    return actions.get("chart", no_update), actions.get("highlight", no_update), ""
+
+
+@app.callback(
+    Output("analysis-figure", "children"),
+    Output("analysis-title", "children"),
+    Output("analysis-caption", "children"),
+    Output("analysis-message", "children"),
+    Output("analysis-panel", "hidden"),
+    Input("analysis", "data"),
+)
+def render_analysis(result):
+    """Any analysis result: a chart with its caption, or the reason there is no chart."""
+    if not result:
+        return None, "", "", None, True
+    text = describe_result(result)
+    graph = None if text["message"] is not None else analysis_graph(build_chart(result))
+    return graph, text["title"], text["caption"], text["message"], False
+
+
+def analysis_graph(figure):
+    """A brand-new graph for every result. Reusing one dcc.Graph fails: Plotly can't switch it between
+    map and cartesian, and after one failed redraw (a colour bar drawn at zero size) it ignores every
+    later figure. A new React key mounts a fresh graph."""
+    return html.Div(dcc.Graph(figure=figure, config={"displayModeBar": False}), key=uuid.uuid4().hex)
+
+
+@app.callback(
+    Output("analysis", "data", allow_duplicate=True),
+    Input("close-analysis", "n_clicks"),
+    prevent_initial_call=True,
+)
+def close_analysis(n_clicks):
+    return None
 
 
 @app.callback(
@@ -707,6 +898,8 @@ def update_profile_charts(profile_id, wmo_id):
     Output("chat-input",    "value"),
     Output("agent-loading", "children"),
     Output("chat-selection", "data"),
+    Output("map-highlight", "data"),
+    Output("analysis", "data"),
     Input("send-btn",   "n_clicks"),
     Input("chat-input", "n_submit"),
     State("chat-input",    "value"),
@@ -719,15 +912,18 @@ def update_profile_charts(profile_id, wmo_id):
 )
 def handle_chat(n_clicks, n_submit, query, messages, history, api_key=None, model=None):
     if not query or not query.strip():
-        return no_update, no_update, no_update, no_update, no_update
+        return (no_update,) * 7
     messages = (messages or [])[-12:] + [chat_bubble(query, role="user")]
     history = (history or [])[-6:]
     # The visitor's key (if any) is used for this request only; it is never logged or stored.
-    response, selection = answer_question(query, history, request.remote_addr or "unknown",
-                                          api_key=api_key, model=model)
+    response, actions = answer_question(query, history, request.remote_addr or "unknown",
+                                        api_key=api_key, model=model)
     messages = messages + [chat_bubble(response)]
     history = history + [{"role": "human", "content": query}, {"role": "assistant", "content": response}]
-    return messages[-12:], history[-6:], "", "", selection or no_update
+    # Missing actions leave the dashboard as it is, so a later answer doesn't clear a highlight.
+    actions = actions or {}
+    return (messages[-12:], history[-6:], "", "", actions.get("select", no_update),
+            actions.get("highlight", no_update), actions.get("chart", no_update))
 
 
 @app.callback(
@@ -745,17 +941,21 @@ def use_suggestion(clicks):
 # Tabs switch in the browser; no server round trip. The tablist class moves the sliding indicator.
 clientside_callback(
     """
-    function(floatsClicks, chatClicks) {
-        const chat = (dash_clientside.callback_context.triggered[0] || {}).prop_id === "tab-chat.n_clicks";
-        return [chat ? "tabs is-chat" : "tabs",
-                chat ? "tab" : "tab is-active", chat ? "tab is-active" : "tab",
-                chat ? "pane is-hidden" : "pane", chat ? "pane" : "pane is-hidden"];
+    function(floatsClicks, regionsClicks, chatClicks) {
+        const id = ((dash_clientside.callback_context.triggered[0] || {}).prop_id || "").split(".")[0];
+        const tab = id === "tab-chat" ? "chat" : id === "tab-regions" ? "regions" : "floats";
+        const pick = (name, yes, no) => (tab === name ? yes : no);
+        return [tab === "floats" ? "tabs" : "tabs is-" + tab,
+                pick("floats", "tab is-active", "tab"), pick("regions", "tab is-active", "tab"),
+                pick("chat", "tab is-active", "tab"),
+                pick("floats", "pane", "pane is-hidden"), pick("regions", "pane", "pane is-hidden"),
+                pick("chat", "pane", "pane is-hidden")];
     }
     """,
     Output("tabs", "className"),
-    Output("tab-floats", "className"), Output("tab-chat", "className"),
-    Output("pane-floats", "className"), Output("pane-chat", "className"),
-    Input("tab-floats", "n_clicks"), Input("tab-chat", "n_clicks"),
+    Output("tab-floats", "className"), Output("tab-regions", "className"), Output("tab-chat", "className"),
+    Output("pane-floats", "className"), Output("pane-regions", "className"), Output("pane-chat", "className"),
+    Input("tab-floats", "n_clicks"), Input("tab-regions", "n_clicks"), Input("tab-chat", "n_clicks"),
     prevent_initial_call=True,
 )
 

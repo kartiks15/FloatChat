@@ -8,19 +8,23 @@ import argo_etl as etl
 import download_argo
 
 
-def make_fixture(path, temp=20, bad_pressure=False):
+def make_fixture(path, temp=20, bad_pressure=False, *, latitude=12, longitude=179.9, juld=27000,
+                 wmo='2902115', cycle=1, data_mode='D', extra=None):
     with Dataset(path, 'w') as nc:
         for name, size in [('N_PROF', 1), ('N_LEVELS', 3), ('STRING8', 8)]:
             nc.createDimension(name, size)
-        nc.createVariable('PLATFORM_NUMBER', 'S1', ('N_PROF', 'STRING8'))[:] = np.array([list('2902115 ')], dtype='S1')
-        for name, value in [('CYCLE_NUMBER', 1), ('JULD', 27000), ('LATITUDE', 12), ('LONGITUDE', 179.9)]:
+        nc.createVariable('PLATFORM_NUMBER', 'S1', ('N_PROF', 'STRING8'))[:] = np.array([list(wmo.ljust(8))], dtype='S1')
+        for name, value in [('CYCLE_NUMBER', cycle), ('JULD', juld), ('LATITUDE', latitude), ('LONGITUDE', longitude)]:
             nc.createVariable(name, 'f8', ('N_PROF',), fill_value=99999)[:] = [value]
-        for name, value in [('DIRECTION', b'A'), ('DATA_MODE', b'D')]:
+        for name, value in [('DIRECTION', b'A'), ('DATA_MODE', data_mode.encode())]:
             nc.createVariable(name, 'S1', ('N_PROF',))[:] = np.array([value], dtype='S1')
         for name, values in [('PRES', [10,20,30]), ('TEMP', [99,99,99]), ('TEMP_ADJUSTED', [temp,temp+1,temp+2])]:
             nc.createVariable(name, 'f8', ('N_PROF', 'N_LEVELS'), fill_value=99999)[:] = [values]
             flags = ['4','4','4'] if bad_pressure and name == 'PRES' else ['1','4','2']
             nc.createVariable(name+'_QC', 'S1', ('N_PROF', 'N_LEVELS'))[:] = np.array([flags], dtype='S1')
+        for name, values in (extra or {}).items():   # e.g. {'PSAL': [35, 35.1, 35.2]}; 99999 is the fill value
+            nc.createVariable(name, 'f8', ('N_PROF', 'N_LEVELS'), fill_value=99999)[:] = [values]
+            nc.createVariable(name+'_QC', 'S1', ('N_PROF', 'N_LEVELS'))[:] = np.array([['1','1','1']], dtype='S1')
 
 
 class EtlTests(unittest.TestCase):
