@@ -1,6 +1,5 @@
 # Python 3.12; exact resolved versions in requirements.lock.
 dash>=3.0,<4
-dash-bootstrap-components>=2,<3
 plotly>=6,<7
 netCDF4>=1.7,<2
 numpy>=2,<3

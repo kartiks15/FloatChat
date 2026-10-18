@@ -1,286 +1,128 @@
-# FloatChat — AI-Powered ARGO Ocean Data Dashboard
+# FloatChat: Argo ocean data explorer
 
-An intelligent oceanographic data exploration platform combining natural language AI with interactive geospatial visualization of ARGO float profiles from the Indian Ocean.
+A web dashboard for exploring Argo float profiles from the Indian Ocean: a full-screen map,
+a profile inspector, region averages, and an AI assistant that answers from the database
+without ever writing SQL.
 
-## Overview
+## Features
 
-FloatChat is a Dash-based web application that provides:
+- **Map** of every profile (each place a float surfaced and measured the water column). Click
+  a dot to inspect it; pick a float to see its trajectory. Filter by period.
+- **Profile inspector**: temperature and salinity against pressure, biogeochemistry (oxygen,
+  chlorophyll-a, nitrate, backscatter) when measured, and a temperature–salinity diagram.
+- **Regions tab** (no AI needed): highlight every profile in a region (Equator 5°S–5°N, Arabian
+  Sea, Bay of Bengal) for chosen months, and chart the average of any measurement by calendar
+  month, month, week or depth.
+- **Ask AI**: plain-English questions such as *"Highlight all the floats on the equator"* or
+  *"Graph the average temperature of floats on the equator from March to June"*. The model picks
+  one of seven fixed, validated read-only operations; Python runs it; the model explains the
+  result. Answers can select a profile, highlight a region on the map, or open a chart.
+- **Open-weight models only**: OpenRouter (visitors can paste their own key), Amazon Bedrock
+  (Qwen3 32B) or a local Ollama. No OpenAI dependency.
 
-- **🤖 AI Chat Interface**: Ask natural language questions about ARGO float data and get intelligent responses
-- **🗺️ Interactive Map**: Visualize float trajectories and profile locations with temperature color-coding
-- **📊 Profile Inspector**: View detailed T/S (temperature-salinity) diagrams, BGC parameters, and depth profiles
-- **🌊 Oceanographic Data**: Access ARGO float profiles including temperature, salinity, dissolved oxygen, chlorophyll-a, and other biogeochemical parameters
+## Quick start (Docker)
 
-## Architecture
-
-```
-Left Sidebar          Center Panel          Right Panel
-(Chat + Floats)      (Interactive Map)     (Profile Charts)
-    ↓                      ↓                    ↓
-User Query → AI Agent (LLM + MCP Tools) → PostgreSQL Database
-    ↑                      ↓
-    └──────────────────────┴──────────────────────┘
-              Response & Visualizations
-```
-
-### Components
-
-- **Frontend**: Dash/Plotly for responsive UI with dark ocean theme
-- **Backend**: Python async application with LangChain 1.x and LangGraph
-- **Database**: PostgreSQL with ARGO float profiles, observations, and computed aggregates
-- **AI/LLM**: OpenAI GPT-4o with Model Context Protocol (MCP) for database access
-- **Visualization**: Plotly for maps, charts, and interactive exploration
-
-## Installation
-
-### 1. Clone and Setup
-
-```bash
-cd FloatChat
-python -m venv .venv
-.venv\Scripts\activate  # Windows
-# or
-source .venv/bin/activate  # Linux/Mac
-```
-
-### 2. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Configure Environment
-
-Copy `env.example` to `.env` and fill in your values:
+Needs Docker with Compose 2.24.4 or later.
 
 ```bash
 cp env.example .env
+# Edit .env: set two different long random values for POSTGRES_PASSWORD and APP_DB_PASSWORD.
+docker compose up --build -d --wait
 ```
 
-Edit `.env` with:
-
-```env
-# Database
-DB_NAME=floatchat
-DB_USER=postgres
-DB_PASS=your_postgres_password
-DB_HOST=localhost
-DB_PORT=5432
-
-# OpenAI API
-OPENAI_API_KEY=sk-...your-key-here...
-
-# Python path (optional, defaults to 'python')
-PYTHON_PATH=python
-```
-
-### 4. Database Setup
-
-Ensure PostgreSQL is running and load the schema:
+Open <http://localhost:8080>. The database starts empty; load some floats:
 
 ```bash
-psql -U postgres -d floatchat -f schema.sql
+python download_argo.py --wmo 2902115 --type Sprof --out-dir data/argo
+docker compose run --rm etl --dir /data/argo --limit 20
+docker compose run --rm etl --dir /data/argo
 ```
 
-Load ARGO data:
+## Quick start (native Python 3.12)
 
 ```bash
-python argo_etl.py --dir data/argo/incois/FLOAT_ID/profiles/
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.lock
+cp env.example .env   # set DB_* (read-only role) and DB_WRITE_* (importer)
+python argo_etl.py --dir data/argo --init-schema
+python app.py         # http://127.0.0.1:8050
 ```
 
-## Running the Application
+You need a PostgreSQL database named `floatchat`. Docker creates the read-only
+`floatchat_reader` role for you. Natively, create it with the SQL in
+`deploy/postgres/20-reader.sh`, or point `DB_USER` at an existing user (sessions are read-only
+either way).
+
+## Loading data
+
+- `download_argo.py` fetches NetCDF files from the IFREMER GDAC. `--sample` gets 7 curated
+  Indian Ocean floats; `--wmo …` gets specific floats; `--type Sprof` gets one merged file per
+  BGC float (recommended).
+- `argo_etl.py` imports them with QC filtering (flags 1 and 2 only), adjusted values for
+  delayed-mode data, per-file transactions, and safe re-imports. It refreshes the
+  `profile_summary` materialized view at the end.
+- For any one float, import **either** its `Sprof` file **or** its core + BGC files, never both.
+
+## Turning on the AI
+
+| Option | Setup |
+| --- | --- |
+| Visitor's own OpenRouter key | Nothing on the server. Open **Ask AI → AI settings** and paste a key from [openrouter.ai/keys](https://openrouter.ai/keys). |
+| Server-paid OpenRouter | `AI_ENABLED=true`, `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY=sk-or-…` |
+| Amazon Bedrock | `AI_ENABLED=true`, `AI_PROVIDER=bedrock`, `AWS_BEARER_TOKEN_BEDROCK=…` |
+| Local Ollama | `ollama pull qwen3:4b`, then `AI_ENABLED=true`, `AI_PROVIDER=ollama` (about 8 GB free RAM) |
+
+Requests are rate-limited (`AI_DAILY_REQUEST_LIMIT`, `AI_HOURLY_CLIENT_LIMIT`,
+`AI_USER_KEY_HOURLY_LIMIT`). Every setting is documented in `env.example`.
+
+## Example questions
+
+- "Summarise the dataset"
+- "List floats from INCOIS"
+- "Profiles near 12°N 72°E"
+- "Highlight all the floats on the equator"
+- "Graph the average temperature of floats on the equator from March to June"
+- "Average salinity by depth in the Arabian Sea in 2024"
+
+## Repository layout
+
+```
+app.py              Dash dashboard: map, inspector, Regions tab, chat, Analysis panel
+chat_service.py     AI pipeline: providers, quotas, plan → tool → answer → dashboard actions
+ocean_tools.py      The validated read-only operations (region filters and averages included)
+database.py         Read-only, time-limited, row-capped PostgreSQL access
+argo_etl.py         NetCDF → PostgreSQL importer
+download_argo.py    Argo file downloader
+postgres_mcp.py     Optional MCP server exposing the same operations
+schema.sql          Tables, indexes and the materialized profile summary
+assets/style.css    Styling
+deploy/             Caddy, production Compose override, Lightsail scripts
+docs/               Project guide and AWS deployment guide
+tests/              unittest suites (set TEST_DATABASE_URL to a *_test database for integration tests)
+```
+
+## Documentation
+
+- [docs/project-guide.md](docs/project-guide.md): how every part works, configuration
+  reference, and where to make common changes.
+- [docs/aws-deployment.md](docs/aws-deployment.md): hosting on AWS Lightsail with HTTPS, costs,
+  backups and adding more floats.
+
+## Tests
 
 ```bash
-python app.py
+python -m unittest discover -s tests -v
 ```
 
-The dashboard will be available at: **http://localhost:8050**
-
-## Deployment
-
-To host FloatChat on AWS Lightsail with Docker Compose and automatic HTTPS (about $12/month,
-covered by new-account AWS credits), follow [docs/aws-deployment.md](docs/aws-deployment.md).
-
-## Usage
-
-### Chat Panel (Left Sidebar)
-
-Ask natural language questions about ARGO data:
-
-- "Show salinity profiles near 12°N 72°E"
-- "List all floats from INCOIS with over 50 profiles"
-- "What's the maximum temperature in the Arabian Sea?"
-- "Compare BGC parameters between different floats"
-
-The AI agent uses database tools to execute queries and return real data.
-
-### Map View (Center)
-
-- **Click profiles** on the map to select and inspect them
-- **Filter by date** using the dropdown (Last 30/90/180 days, or all time)
-- **Hover** over markers to see float ID, date, and max temperature
-- **View float trajectories** when a float is selected (highlighted in cyan)
-
-### Profile Inspector (Right Panel)
-
-When a profile is selected:
-
-- **T/S Chart**: Temperature vs Salinity depth profile with dual axes
-- **BGC Chart**: Dissolved oxygen, chlorophyll-a, and nitrate concentrations
-- **T–S Diagram**: Temperature-salinity scatter plot for water mass identification
-- **Stats**: Maximum temperature, average salinity, and maximum depth
-
-## Project Structure
-
-```
-FloatChat/
-├── app.py                      # Main Dash application
-├── postgres_mcp.py             # MCP server for database access
-├── argo_etl.py                 # ETL script for loading ARGO data
-├── download_argo.py            # Script to download ARGO data
-├── schema.sql                  # PostgreSQL schema
-├── requirements.txt            # Python dependencies
-├── env.example                 # Environment template
-├── README.md                   # This file
-├── data/
-│   └── argo/
-│       └── incois/             # ARGO profiles (NetCDF format)
-│           └── 2902115/
-│               └── profiles/
-│                   ├── BD2902115_001.nc
-│                   ├── BD2902115_002.nc
-│                   └── ...
-└── __pycache__/
-```
-
-## Database Schema
-
-### floats
-- `wmo_id`: World Meteorological Organization ID (primary key)
-- `platform_type`: Type of float platform
-- `dac`: Data Assembly Center
-- `project_name`: Associated project
-- `pi_name`: Principal investigator
-
-### profiles
-- `profile_id`: Unique profile identifier
-- `wmo_id`: Float WMO ID (foreign key)
-- `cycle_number`: Cycle number for this float
-- `direction`: Ascending or descending profile
-- `latitude`, `longitude`: Location
-- `date_utc`: Profile timestamp
-- `data_mode`: Real-time or delayed-mode
-
-### observations
-- `obs_id`: Observation ID
-- `profile_id`: Profile ID (foreign key)
-- `pres`: Pressure (dbar)
-- `temp`: Temperature (°C)
-- `psal`: Practical salinity (PSU)
-- `doxy`: Dissolved oxygen (μmol/kg)
-- `chla`: Chlorophyll-a (mg/m³)
-- `nitrate`: Nitrate (μmol/kg)
-- `bbp700`: Backscatter at 700nm
-
-### profile_summary
-Materialized view with aggregated statistics per profile:
-- Count of observations
-- Temperature/salinity extremes
-- Presence of BGC parameters
-
-## Configuration
-
-### Theme Customization
-
-Edit color palette in `app.py`:
-
-```python
-OCEAN_DARK   = "#040d1a"
-OCEAN_MID    = "#071a2e"
-OCEAN_CARD   = "#0a2240"
-ACCENT_CYAN  = "#00d4ff"
-ACCENT_WARM  = "#f0a500"
-```
-
-### AI Agent Customization
-
-Modify `SYSTEM_PROMPT` in `app.py` to change agent behavior and capabilities.
-
-### Map Style
-
-Change `mapbox=dict(style="carto-darkmatter", ...)` to other Mapbox styles (e.g., "streets-v11", "satellite-v9").
-
-## Troubleshooting
-
-### Agent Error: "unhandled errors in a TaskGroup"
-
-This usually indicates an issue with MCP tool loading or database connection:
-
-1. Check `.env` file is properly configured
-2. Verify PostgreSQL is running: `psql -U postgres -c "SELECT 1"`
-3. Check database exists: `psql -l | grep floatchat`
-4. Review terminal output for detailed error messages
-
-### No floats appearing on map
-
-1. Verify data is loaded: `psql -U postgres -d floatchat -c "SELECT COUNT(*) FROM profiles"`
-2. Check profiles have valid coordinates: `SELECT COUNT(*) FROM profiles WHERE latitude IS NOT NULL`
-3. Ensure profile_summary view exists: `psql -U postgres -d floatchat -c "SELECT * FROM profile_summary LIMIT 1"`
-
-### Slow response times
-
-1. Check database indexes: PostgreSQL should auto-index foreign keys
-2. Limit data range using date filter
-3. Monitor PostgreSQL performance: `SELECT * FROM pg_stat_statements`
-
-## Key Technologies
-
-- **Framework**: [Dash](https://dash.plotly.com/) (Python web framework)
-- **Visualization**: [Plotly](https://plotly.com/python/)
-- **Database**: PostgreSQL with psycopg2
-- **LLM**: OpenAI GPT-4o
-- **Agent Framework**: [LangChain](https://www.langchain.com/) + [LangGraph](https://github.com/langchain-ai/langgraph)
-- **Async Support**: [nest_asyncio](https://github.com/erdewit/nest_asyncio)
-- **DB Access**: Model Context Protocol (MCP) via [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
-
-## Environment Variables
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `DB_NAME` | PostgreSQL database name | `floatchat` | ✓ |
-| `DB_USER` | PostgreSQL user | `postgres` | ✓ |
-| `DB_PASS` | PostgreSQL password | `` | ✓ |
-| `DB_HOST` | PostgreSQL host | `localhost` | ✓ |
-| `DB_PORT` | PostgreSQL port | `5432` | |
-| `OPENAI_API_KEY` | OpenAI API key | | ✓ |
-| `PYTHON_PATH` | Python executable path | `python` | |
-
-## Performance Tips
-
-1. **Data Loading**: Use date filter to reduce initial map load
-2. **Queries**: Ask specific questions (e.g., "floats in Bay of Bengal" vs "all floats")
-3. **Database**: Add indexes on commonly filtered columns (date_utc, latitude, longitude)
-4. **Caching**: Consider Redis for frequently accessed queries
-
-## Contributing
-
-To extend FloatChat:
-
-1. Add new chat capabilities in `SYSTEM_PROMPT`
-2. Create new PostgreSQL tools in `postgres_mcp.py`
-3. Add new chart types in `build_*_chart()` functions
-4. Modify styling via `STYLES` dictionary and color palette
+Integration tests run only when `TEST_DATABASE_URL` points at a disposable database whose name
+ends in `_test`. CI runs everything against PostgreSQL 16 and boots the Docker stack.
 
 ## License
 
 General Public License
 
-## Contact
-
-For questions about the ARGO program, visit: https://www.goaargo.ucsd.edu/
-
 ## Acknowledgments
 
-- ARGO float data from international oceanographic centers
-- INCOIS (Indian National Centre for Ocean Information Services) for regional deployment
-- OpenAI for GPT-4o language model
+- Argo float data from the international Argo program and its data assembly centres
+  ([argo.ucsd.edu](https://argo.ucsd.edu/))
+- INCOIS (Indian National Centre for Ocean Information Services) for regional deployments
