@@ -154,6 +154,19 @@ class PostgresIntegrationTests(unittest.TestCase):
         result = ocean_tools.aggregate_measurements(region='equator')
         self.assertEqual((result['n_profiles'], result['rows'][0]['n_profiles']), (1, 1))
 
+    def test_reimport_upgrades_profile_data_mode_but_never_downgrades(self):
+        with tempfile.TemporaryDirectory() as folder:
+            real, delayed = Path(folder) / 'R2902115_001.nc', Path(folder) / 'D2902115_001.nc'
+            make_fixture(real, data_mode='R')
+            make_fixture(delayed)
+            for path, expected in [(real, ('R', 'R2902115_001.nc')), (delayed, ('D', 'D2902115_001.nc')),
+                                   (real, ('D', 'D2902115_001.nc'))]:
+                self.assertIsNone(etl.process_file(self.conn, path)['error'])
+                with self.conn.cursor() as cur:
+                    cur.execute('SELECT data_mode, source_file FROM profiles')
+                    self.assertEqual(cur.fetchone(), expected)
+                self.conn.commit()
+
     def test_readonly_connection_rejects_writes_even_for_admin(self):
         conn = database.connect_readonly()
         try:

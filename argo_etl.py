@@ -19,6 +19,9 @@ from dotenv import load_dotenv
 load_dotenv()
 log = logging.getLogger(__name__)
 QC_GOOD = {1, 2}
+# A re-import only moves a profile's mode up (R < A < D), so a real-time file never undoes delayed data.
+MODE_AT_LEAST = ("COALESCE(array_position(ARRAY['R','A','D'], EXCLUDED.data_mode::text), 0) >= "
+                 "COALESCE(array_position(ARRAY['R','A','D'], profiles.data_mode::text), 0)")
 PARAMETERS = ("PRES", "TEMP", "PSAL", "DOXY", "CHLA", "NITRATE", "BBP700")
 
 
@@ -172,8 +175,10 @@ def process_file(conn, nc_path):
                     VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT(wmo_id,cycle_number,direction) DO UPDATE SET
                     latitude=COALESCE(profiles.latitude,EXCLUDED.latitude),
-                    longitude=COALESCE(profiles.longitude,EXCLUDED.longitude)
-                    RETURNING profile_id""", [wmo,int(cycle),direction,lat,lon,
+                    longitude=COALESCE(profiles.longitude,EXCLUDED.longitude),
+                    data_mode=CASE WHEN {better} THEN EXCLUDED.data_mode ELSE profiles.data_mode END,
+                    source_file=CASE WHEN {better} THEN EXCLUDED.source_file ELSE profiles.source_file END
+                    RETURNING profile_id""".format(better=MODE_AT_LEAST), [wmo,int(cycle),direction,lat,lon,
                     clean_float(read_scalar(nc,"JULD",index)),date_utc,
                     decode_str_var(nc,"POSITIONING_SYSTEM",index)[:16],mode,Path(nc_path).name[:256]])
                 profile_id = cur.fetchone()[0]
