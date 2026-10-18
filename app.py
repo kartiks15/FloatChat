@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 
 from database import fetch_rows
 from chat_service import answer_question, ai_enabled, user_keys_allowed, openrouter_models, MAX_QUERY_CHARS
+from ocean_tools import region_points
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -84,7 +85,10 @@ INK = "#f4f4f5"
 INK_2 = "#a1a1aa"
 MUTED = "#8b8b94"
 ACCENT = "#34d399"          # the one UI accent (emerald)
+HIGHLIGHT = "#fbbf24"       # profiles highlighted by a region (amber, distinct from the selection)
 PROFILE_DOT = "#a1a1aa"
+# Map trace slots: the highlight sits above the grey dots and below the selection.
+TRACE_PROFILES, TRACE_HIGHLIGHT, TRACE_TRAJECTORY, TRACE_HALO, TRACE_DOT = range(5)
 # Data series, validated with the dataviz palette checks against the #18181b panel surface.
 COLORS = {"temp": "#d95926", "psal": "#3987e5", "doxy": "#3987e5",
           "chla": "#199e70", "nitrate": "#c98500", "bbp700": "#d55181"}
@@ -155,8 +159,17 @@ def selection_traces(meta):
                           marker=dict(size=10, color=ACCENT))]
 
 
-def build_map(profiles, selected_wmo=None, trajectory=None, selected=None):
-    """Trace order is fixed (profiles, trajectory, halo, dot) so selection can be patched."""
+def highlight_trace(points):
+    return go.Scattermap(
+        lat=[p["latitude"] for p in points], lon=[p["longitude"] for p in points], mode="markers",
+        marker=dict(size=9, color=HIGHLIGHT, opacity=0.9), name="Highlighted",
+        customdata=[[p["profile_id"], p["wmo_id"]] for p in points],
+        text=[f"WMO {p['wmo_id']} · {fmt_date(p['date_utc'])}<br>Highlighted" for p in points],
+        hovertemplate="%{text}<extra></extra>")
+
+
+def build_map(profiles, selected_wmo=None, trajectory=None, selected=None, highlight=None):
+    """Trace order is fixed (see TRACE_*) so the highlight and selection can be patched."""
     lats = [p["latitude"] for p in profiles]
     lons = [p["longitude"] for p in profiles]
     texts = []
@@ -169,11 +182,14 @@ def build_map(profiles, selected_wmo=None, trajectory=None, selected=None):
         marker=dict(size=7, color=PROFILE_DOT, opacity=0.55),
         text=texts, hovertemplate="%{text}<extra></extra>",
         customdata=[[p["profile_id"], p["wmo_id"]] for p in profiles]))
+    fig.add_trace(highlight_trace(highlight or []))
     traj = trajectory if trajectory is not None else (get_trajectory(selected_wmo) if selected_wmo else [])
     fig.add_trace(trajectory_trace(traj))
     fig.add_traces(selection_traces(selected))
     if traj:
         center, zoom = map_view([t["latitude"] for t in traj], [t["longitude"] for t in traj])
+    elif highlight:
+        center, zoom = map_view([p["latitude"] for p in highlight], [p["longitude"] for p in highlight])
     else:
         center, zoom = map_view(lats, lons)
     fig.update_layout(**BASE_LAYOUT)
@@ -415,6 +431,8 @@ app.layout = html.Div([
     dcc.Store(id="selected-wmo", data=None),
     dcc.Store(id="float-data", data=None),   # None while loading, {"error": ...} on failure
     dcc.Store(id="chat-selection", data=None),
+    dcc.Store(id="map-highlight", data=None),   # {"filter": RegionFilter fields, "label": str}
+    dcc.Store(id="analysis", data=None),        # an aggregate_measurements result to chart
     dcc.Store(id="api-key-store", storage_type="session"),
     dcc.Store(id="server-ai", data={"enabled": ai_enabled()}),
     dcc.Store(id="scroll-sink"),
@@ -489,6 +507,9 @@ app.layout = html.Div([
             ], className="toolbar glass reveal", style={"--d": 160}),
             html.Div([
                 html.Div(status_chip("Connecting", "idle"), id="db-status", className="status"),
+                html.Div([html.Span(className="highlight-swatch"), html.Span(id="highlight-label"),
+                          html.Button("Clear", id="clear-highlight", n_clicks=0, className="btn btn-ghost btn-sm")],
+                         id="highlight-chip", className="highlight-chip", hidden=True),
                 html.Div("Click a dot to inspect a profile", className="hint"),
             ], className="statusbar glass reveal", style={"--d": 240}),
         ], className="col-center"),
@@ -538,8 +559,9 @@ app.layout = html.Div([
     Input("date-filter", "value"),
     State("selected-wmo", "data"),
     State("selected-profile", "data"),
+    State("map-highlight", "data"),
 )
-def load_data(date_filter, selected_wmo=None, selected_profile=None):
+def load_data(date_filter, selected_wmo=None, selected_profile=None, highlight=None):
     # Relative to the dataset's latest measurement so historical samples remain useful.
     if date_filter not in ("all", "30", "90", "180", "365"):
         date_filter = "all"
@@ -556,6 +578,8 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None):
         floats = get_float_list()
         trajectory = get_trajectory(selected_wmo) if selected_wmo else []
         selected = get_profile_meta(selected_profile) if selected_profile else None
+        # The highlight shows its own filter, independent of the period.
+        highlighted = region_points(**highlight["filter"])["rows"] if highlight else []
     except Exception as exc:
         log.warning("Data unavailable (%s)", type(exc).__name__)
         return ({"error": "database"}, build_map([]), status_chip("Database unavailable", "error"),
@@ -574,7 +598,8 @@ def load_data(date_filter, selected_wmo=None, selected_profile=None):
     kpis = [kpi(f"{len(float_data):,}", "floats"),
             kpi(f"{sum(f['n_profiles'] for f in float_data):,}", "profiles"),
             kpi(latest or "—", "latest")]
-    return float_data, build_map(profiles, selected_wmo, trajectory, selected), status_chip(status, "live"), kpis
+    return (float_data, build_map(profiles, selected_wmo, trajectory, selected, highlighted),
+            status_chip(status, "live"), kpis)
 
 
 @app.callback(
@@ -642,15 +667,51 @@ def update_map_selection(wmo_id, profile_id):
     except Exception:
         return no_update
     patch = Patch()
-    patch["data"][1] = trajectory_trace(traj).to_plotly_json()
+    patch["data"][TRACE_TRAJECTORY] = trajectory_trace(traj).to_plotly_json()
     halo, dot = selection_traces(meta)
-    patch["data"][2] = halo.to_plotly_json()
-    patch["data"][3] = dot.to_plotly_json()
-    if "selected-wmo.data" in ctx.triggered_prop_ids and traj:
+    patch["data"][TRACE_HALO] = halo.to_plotly_json()
+    patch["data"][TRACE_DOT] = dot.to_plotly_json()
+    if traj and "selected-wmo.data" in ctx.triggered_prop_ids:
         center, zoom = map_view([t["latitude"] for t in traj], [t["longitude"] for t in traj])
         patch["layout"]["map"]["center"] = center
         patch["layout"]["map"]["zoom"] = zoom
     return patch
+
+
+@app.callback(
+    Output("main-map", "figure", allow_duplicate=True),
+    Output("highlight-label", "children"),
+    Output("highlight-chip", "hidden"),
+    Input("map-highlight", "data"),
+    prevent_initial_call=True,
+)
+def update_highlight(highlight):
+    """Patch only the highlight trace and frame the map to it."""
+    try:
+        result = region_points(**highlight["filter"]) if highlight else {"rows": [], "truncated": False}
+    except Exception as exc:
+        log.warning("Highlight unavailable (%s)", type(exc).__name__)
+        return no_update, no_update, no_update
+    points = result["rows"]
+    patch = Patch()
+    patch["data"][TRACE_HIGHLIGHT] = highlight_trace(points).to_plotly_json()
+    if points:
+        center, zoom = map_view([p["latitude"] for p in points], [p["longitude"] for p in points])
+        patch["layout"]["map"]["center"] = center
+        patch["layout"]["map"]["zoom"] = zoom
+    if not highlight:
+        return patch, "", True
+    count = f"{len(points):,} profile{'' if len(points) == 1 else 's'}"
+    return patch, f"{highlight['label']} · {count}" + (" (latest 5,000)" if result["truncated"] else ""), False
+
+
+@app.callback(
+    Output("map-highlight", "data", allow_duplicate=True),
+    Input("clear-highlight", "n_clicks"),
+    prevent_initial_call=True,
+)
+def clear_highlight(n_clicks):
+    return None
 
 
 @app.callback(
@@ -707,6 +768,8 @@ def update_profile_charts(profile_id, wmo_id):
     Output("chat-input",    "value"),
     Output("agent-loading", "children"),
     Output("chat-selection", "data"),
+    Output("map-highlight", "data"),
+    Output("analysis", "data"),
     Input("send-btn",   "n_clicks"),
     Input("chat-input", "n_submit"),
     State("chat-input",    "value"),
@@ -719,15 +782,18 @@ def update_profile_charts(profile_id, wmo_id):
 )
 def handle_chat(n_clicks, n_submit, query, messages, history, api_key=None, model=None):
     if not query or not query.strip():
-        return no_update, no_update, no_update, no_update, no_update
+        return (no_update,) * 7
     messages = (messages or [])[-12:] + [chat_bubble(query, role="user")]
     history = (history or [])[-6:]
     # The visitor's key (if any) is used for this request only; it is never logged or stored.
-    response, selection = answer_question(query, history, request.remote_addr or "unknown",
-                                          api_key=api_key, model=model)
+    response, actions = answer_question(query, history, request.remote_addr or "unknown",
+                                        api_key=api_key, model=model)
     messages = messages + [chat_bubble(response)]
     history = history + [{"role": "human", "content": query}, {"role": "assistant", "content": response}]
-    return messages[-12:], history[-6:], "", "", selection or no_update
+    # Missing actions leave the dashboard as it is, so a later answer doesn't clear a highlight.
+    actions = actions or {}
+    return (messages[-12:], history[-6:], "", "", actions.get("select", no_update),
+            actions.get("highlight", no_update), actions.get("chart", no_update))
 
 
 @app.callback(

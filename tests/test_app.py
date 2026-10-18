@@ -1,9 +1,12 @@
 import unittest
 from unittest.mock import patch
+from dash import no_update
 import app
 
 
 class DashboardTests(unittest.TestCase):
+    POINT = dict(profile_id=9, wmo_id='2902115', latitude=0.5, longitude=80, date_utc='2024-03-15')
+
     def test_starts_without_model_or_database(self):
         client = app.server.test_client()
         self.assertEqual(client.get('/').status_code, 200)
@@ -61,7 +64,7 @@ class DashboardTests(unittest.TestCase):
         profiles = [dict(latitude=lat, longitude=lon, wmo_id='1', date_utc=None, temp_max=20, profile_id=i)
                     for i, (lat, lon) in enumerate([(10, 60), (20, 80)])]
         fig = app.build_map(profiles, trajectory=[], selected=None)
-        self.assertEqual(len(fig.data), 4)
+        self.assertEqual(len(fig.data), 5)
         # Centred on the data, nudged right so it sits in the gap between the side panels.
         self.assertGreater(fig.layout.map.center.lon, 70)
         self.assertLess(fig.layout.map.center.lon, 73)
@@ -79,6 +82,43 @@ class DashboardTests(unittest.TestCase):
         items, caption = app.render_float_list(floats, 'ao', '5906539')
         self.assertEqual(caption, '1 of 2 floats')
         self.assertIn('is-selected', items[0].className)
+
+    def test_map_has_highlight_slot_under_selection(self):
+        fig = app.build_map([], trajectory=[], selected=None, highlight=[self.POINT])
+        self.assertEqual(len(fig.data), 5)
+        self.assertEqual(list(fig.data[app.TRACE_HIGHLIGHT].lat), [0.5])
+        self.assertEqual(list(fig.data[app.TRACE_HIGHLIGHT].customdata[0]), [9, '2902115'])
+        self.assertEqual(fig.data[app.TRACE_DOT].name, 'Selected profile')
+
+    def test_update_highlight_patches_its_slot(self):
+        with patch('app.region_points', return_value={'rows': [self.POINT], 'truncated': False}) as points:
+            patch_obj, label, hidden = app.update_highlight({'filter': {'region': 'equator'}, 'label': '5°S–5°N'})
+        points.assert_called_once_with(region='equator')
+        locations = [op['location'] for op in patch_obj.to_plotly_json()['operations']]
+        self.assertIn(['data', app.TRACE_HIGHLIGHT], locations)
+        self.assertEqual((label, hidden), ('5°S–5°N · 1 profile', False))
+        _, _, hidden = app.update_highlight(None)
+        self.assertTrue(hidden)
+
+    def test_load_data_keeps_highlight(self):
+        with patch('app.db_query', return_value=[]), \
+             patch('app.region_points', return_value={'rows': [self.POINT], 'truncated': False}):
+            _, fig, _, _ = app.load_data('30', None, None, {'filter': {'region': 'equator'}, 'label': 'x'})
+        self.assertEqual(list(fig.data[app.TRACE_HIGHLIGHT].lat), [0.5])
+
+    def test_selection_patch_leaves_highlight(self):
+        with patch('app.get_trajectory', return_value=[]), patch('app.get_profile_meta', return_value=None):
+            patch_obj = app.update_map_selection(None, None)
+        locations = [op['location'] for op in patch_obj.to_plotly_json()['operations']]
+        self.assertNotIn(['data', app.TRACE_HIGHLIGHT], locations)
+
+    def test_handle_chat_routes_actions(self):
+        chart = {'rows': []}
+        highlight = {'filter': {'region': 'equator'}, 'label': 'x'}
+        with app.server.test_request_context('/'), \
+             patch('app.answer_question', return_value=('ok', {'highlight': highlight, 'chart': chart})):
+            out = app.handle_chat(1, 0, 'equator', [], [])
+        self.assertEqual(out[-3:], (no_update, highlight, chart))
 
 
 if __name__ == '__main__':

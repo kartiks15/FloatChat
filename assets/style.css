@@ -15,6 +15,7 @@
   --accent: #34d399;
   --accent-ink: #04221a;
   --accent-soft: rgba(52, 211, 153, 0.12);
+  --highlight: #fbbf24;
   --danger: #f87171;
   --radius-xl: 20px;
   --radius: 14px;
@@ -116,6 +117,9 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .statusbar { display: flex; align-items: center; gap: 14px; padding: 8px 14px; border-radius: 999px; font-size: 12.5px; }
 .status { display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
 .hint { color: var(--muted); }
+.highlight-chip { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); }
+.highlight-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--highlight); flex: none; }
+.btn-sm { padding: 3px 10px; font-size: 12px; font-weight: 500; border-radius: 999px; }
 
 .status-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .status-dot.is-live, .is-on .status-dot { background: var(--accent); }
